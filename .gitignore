@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.codex/commander.local.md
+.local-evaluation/
+dist/
+# Local environment files are not needed by this skill.
+.env
+.env.*
