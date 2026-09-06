@@ -90,6 +90,28 @@ remote-tag check, or a GitHub Release check.
 recompute it from the final reviewed candidate; until then, the package checker
 correctly reports manifest drift rather than a clean package result.
 
+## COD-17 final local-candidate gate
+
+The final local gate was run on macOS on 2026-09-06 after integrating COD-13
+through COD-16 and regenerating `RELEASE_CHECKSUMS.txt` from the resulting file
+set. This is local candidate evidence only. It does not substitute for the
+required hosted Ubuntu/macOS and Python 3.10–3.13 matrix, independent review,
+remote-tag verification, or GitHub Release verification.
+
+| Check | Observed result |
+| --- | --- |
+| `python3.11 -B -m unittest discover -s tests -v` | 71 tests passed. |
+| `python3.12 -B -m unittest discover -s tests -v` | 71 tests passed. |
+| `python3.11 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
+| `python3.12 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
+| Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
+| `.github/workflows/ci.yml` | Parsed locally and configures eight Ubuntu/macOS and Python 3.10–3.13 jobs; hosted results remain a release gate. |
+| Git candidate state | `VERSION` is `0.2.0`, the checksum manifest matches the candidate file set, and the reviewed worktree is clean. |
+
+The checksum result establishes internal file-set, version, and hash
+consistency only. The provenance and publication limitations stated above still
+apply.
+
 ## Version 0.1.3: bilingual publication preparation
 
 Added a complete Simplified Chinese README with reciprocal language links.
