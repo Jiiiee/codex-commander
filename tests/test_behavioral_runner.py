@@ -101,34 +101,89 @@ print(json.dumps({"request": request, "cwd": os.getcwd()}, ensure_ascii=False))
         self.assertNotEqual(evaluator_cwd, PACKAGE_ROOT)
         self.assertFalse(evaluator_cwd.exists())
 
-    def test_real_evaluator_reads_actual_read_only_skill_snapshot(self):
+    def test_real_evaluator_reads_complete_isolated_skill_snapshot(self):
         self.write_cases("skill-source")
-        evaluator = """
+        expected_paths = {
+            "SKILL.md",
+            "NOTICE.md",
+            "references/engineering-depth.md",
+            "references/project-records.md",
+            "references/sidebar-coordination.md",
+        }
+        expected_content = {
+            relative: (PACKAGE_ROOT / relative).read_text(encoding="utf-8")
+            for relative in expected_paths
+        }
+        forbidden_root = str(PACKAGE_ROOT.resolve())
+        evaluator = f"""
 import json
+import os
 from pathlib import Path
 import stat
 import sys
 
 request = json.load(sys.stdin)
 skill_path = Path(request["skill"])
-print(json.dumps({
+expected = {expected_content!r}
+forbidden_root = {forbidden_root!r}
+actual = {{
+    str(path.relative_to(Path.cwd())): path.read_text(encoding="utf-8")
+    for path in Path.cwd().rglob("*")
+    if path.is_file()
+}}
+required_references = [
+    Path("references/engineering-depth.md"),
+    Path("references/sidebar-coordination.md"),
+    Path("references/project-records.md"),
+]
+reference_content = {{
+    str(path): path.read_text(encoding="utf-8") for path in required_references
+}}
+write_bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+modes = {{
+    relative: stat.S_IMODE(Path(relative).stat().st_mode) for relative in actual
+}}
+request_text = json.dumps(request, ensure_ascii=False)
+environment_leaks = [
+    name for name, value in os.environ.items() if forbidden_root in value
+]
+assert skill_path.read_text(encoding="utf-8") == expected["SKILL.md"]
+assert reference_content == {{path: expected[path] for path in reference_content}}
+assert actual == expected
+assert all(mode & write_bits == 0 for mode in modes.values())
+assert forbidden_root not in request_text
+assert not environment_leaks
+assert "OLDPWD" not in os.environ
+assert os.environ["PWD"] == os.getcwd()
+assert os.environ["BEHAVIORAL_KEEP"] == "preserved"
+print(json.dumps({{
     "path": str(skill_path),
-    "content": skill_path.read_text(encoding="utf-8"),
-    "mode": stat.S_IMODE(skill_path.stat().st_mode),
-}))
+    "cwd": os.getcwd(),
+    "files": sorted(actual),
+    "modes": modes,
+    "environmentLeaks": environment_leaks,
+}}))
 """
-        status, _, stderr = self.run_custom([sys.executable, "-c", evaluator])
+        inherited = {
+            "PWD": forbidden_root,
+            "OLDPWD": str(PACKAGE_ROOT.parent),
+            "BEHAVIORAL_PACKAGE_LEAK": f"prefix:{forbidden_root}:suffix",
+            "BEHAVIORAL_KEEP": "preserved",
+        }
+        with mock.patch.dict(os.environ, inherited, clear=False):
+            status, _, stderr = self.run_custom([sys.executable, "-c", evaluator])
 
         self.assertEqual((status, stderr), (runner.EXIT_SUCCESS, ""))
         result = json.loads(self.output.read_text(encoding="utf-8"))["results"][0]
         response = json.loads(result["response"])
         self.assertEqual(response["path"], "SKILL.md")
-        self.assertEqual(
-            response["content"],
-            (PACKAGE_ROOT / "SKILL.md").read_text(encoding="utf-8"),
-        )
+        self.assertEqual(set(response["files"]), expected_paths)
         write_bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
-        self.assertEqual(response["mode"] & write_bits, 0)
+        self.assertTrue(all(mode & write_bits == 0 for mode in response["modes"].values()))
+        self.assertEqual(response["environmentLeaks"], [])
+        evaluator_cwd = Path(response["cwd"])
+        self.assertNotEqual(evaluator_cwd, PACKAGE_ROOT)
+        self.assertFalse(evaluator_cwd.exists())
 
     def test_real_nonzero_exit_is_a_case_failure_and_later_case_runs(self):
         self.write_cases("bad", "good")

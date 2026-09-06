@@ -7,17 +7,20 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
 import tempfile
 from typing import Any, Callable, Sequence
+from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "tests/behavioral-cases.json"
 SKILL_SOURCE = ROOT / "SKILL.md"
 SKILL_REQUEST_PATH = Path("SKILL.md")
+MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
 RESULT_SCHEMA_VERSION = 1
 REQUEST_SCHEMA_VERSION = 1
 EXIT_SUCCESS = 0
@@ -89,6 +92,66 @@ def dry_run(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def skill_snapshot_sources() -> list[tuple[Path, Path]]:
+    """Return the smallest package-root-local closure of Markdown references."""
+    package_root = SKILL_SOURCE.parent.resolve()
+    pending = [SKILL_SOURCE]
+    sources: list[tuple[Path, Path]] = []
+    seen: set[Path] = set()
+
+    while pending:
+        candidate = pending.pop(0)
+        try:
+            source = candidate.resolve(strict=True)
+            relative = source.relative_to(package_root)
+        except (OSError, ValueError) as exc:
+            raise RunnerError(f"invalid skill package reference: {candidate}") from exc
+        if source in seen:
+            continue
+        if not source.is_file():
+            raise RunnerError(f"skill package reference is not a file: {relative}")
+
+        seen.add(source)
+        sources.append((source, relative))
+        if source.suffix.lower() != ".md":
+            continue
+        try:
+            content = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise RunnerError(f"cannot read skill package file {relative}: {exc}") from exc
+        for match in MARKDOWN_LINK.finditer(content):
+            target = match.group("target").strip("<>")
+            parsed = urlsplit(target)
+            if parsed.scheme or parsed.netloc or not parsed.path:
+                continue
+            linked = source.parent / unquote(parsed.path)
+            if linked.suffix.lower() == ".md":
+                pending.append(linked)
+
+    return sources
+
+
+def stage_skill_snapshot(workdir: Path) -> None:
+    for source, relative in skill_snapshot_sources():
+        destination = workdir / relative
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source.read_bytes())
+            destination.chmod(0o444)
+        except OSError as exc:
+            raise RunnerError(f"cannot stage skill package file {relative}: {exc}") from exc
+
+
+def evaluator_environment(workdir: Path) -> dict[str, str]:
+    package_root = str(SKILL_SOURCE.parent.resolve())
+    environment = {
+        name: value for name, value in os.environ.items() if package_root not in value
+    }
+    environment.pop("OLDPWD", None)
+    environment["PWD"] = str(workdir.resolve())
+    return environment
+
+
 def _terminate_evaluator(process: subprocess.Popen[str]) -> None:
     """Stop the evaluator boundary without leaving POSIX descendants running."""
     if os.name == "posix":
@@ -119,20 +182,17 @@ def run_case(
     input_text = json.dumps(request, ensure_ascii=False) + "\n"
 
     # A fresh writable directory is the complete filesystem boundary we can
-    # provide portably. Supply the repository skill as a read-only snapshot in
-    # that directory so the request's relative path resolves without passing
-    # the repository path to the evaluator. POSIX additionally gets a fresh
-    # process group so a timeout or interrupt can terminate descendants.
+    # provide portably. Supply the skill's local Markdown reference closure as a
+    # read-only snapshot so relative links resolve without passing the repository
+    # path to the evaluator. POSIX additionally gets a fresh process group so a
+    # timeout or interrupt can terminate descendants.
     with tempfile.TemporaryDirectory(prefix="behavioral-evaluator-") as workdir:
-        skill_path = Path(workdir) / SKILL_REQUEST_PATH
-        try:
-            skill_path.write_bytes(SKILL_SOURCE.read_bytes())
-            skill_path.chmod(0o444)
-        except OSError as exc:
-            raise RunnerError(f"cannot stage skill source: {exc}") from exc
+        evaluator_cwd = Path(workdir).resolve()
+        stage_skill_snapshot(evaluator_cwd)
 
         popen_options: dict[str, Any] = {
-            "cwd": workdir,
+            "cwd": evaluator_cwd,
+            "env": evaluator_environment(evaluator_cwd),
             "stdin": subprocess.PIPE,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
