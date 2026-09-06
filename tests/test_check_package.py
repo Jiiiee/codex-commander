@@ -227,7 +227,7 @@ class CheckPackageTests(unittest.TestCase):
             "https://o'reilly@example.test/Users/alice/guide",
             "https://example.test/release's/Users/alice/guide",
             "https://example.test/o'reilly/opt/tool",
-            "https://example.test/releases/[stable]/Users/alice/guide",
+            "https://example.test/releases/%5Bstable%5D/Users/alice/guide",
             "https://example.test/Users/alice,https://example.test/root/guide",
             "See   https://example.test/root/network-guide",
             "See ( https://example.test/releases/foo(/Users/alice/guide)",
@@ -251,6 +251,47 @@ class CheckPackageTests(unittest.TestCase):
         for example in examples:
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_invalid_raw_uri_path_characters_fail_closed(self):
+        examples = (
+            "https://example.test/guide}/" + "Users/alice/private",
+            "https://example.test/guide|/" + "root/private",
+            "https://example.test/guide^/" + "opt/vendor/tool",
+            r"https://example.test/guide\C:" + r"\Users\alice\private",
+            r"https://example.test/guide\C%3A" + r"%5CUsers%5Calice%5Cprivate",
+            "https://example.test/guide[/" + "Users/alice/private",
+            "https://example.test/guide]/" + "root/private",
+            "https://example.test/guide\x00/" + "opt/vendor/tool",
+            "https://example.test/guide\x7f/" + "Users/alice/private",
+            "https://example.test/guide\x85/" + "root/private",
+            "https://example.test/releases/[stable]/" + "Users/alice/private",
+        )
+        for example in examples:
+            with self.subTest(example=repr(example)):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_c0_c1_and_del_in_uri_paths_fail_closed(self):
+        controls = tuple(range(0x20)) + tuple(range(0x7F, 0xA0))
+        for codepoint in controls:
+            example = (
+                "https://example.test/guide"
+                + chr(codepoint)
+                + "/"
+                + "Users/alice/private"
+            )
+            with self.subTest(codepoint=hex(codepoint)):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_percent_encoded_and_rfc_pchar_network_paths_remain_exempt(self):
+        examples = (
+            "https://example.test/-._~!$&'()*+,;=:@/Users/alice/guide",
+            "https://example.test/%7D%7C%5E%5B%5D/" + "root/guide",
+            "https://example.test/%00%7F/%2Fopt%2Fvendor%2Fguide",
+            "https://example.test/a:b@c/Users/alice/guide?x=!$&'()*+,;=:@#part_*",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
 
     def test_embedded_or_ambiguous_http_scheme_prefixes_fail_closed(self):
         examples = (
@@ -340,6 +381,79 @@ class CheckPackageTests(unittest.TestCase):
         for example in examples:
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_gfm_cjk_and_autolink_wrappers_cannot_absorb_machine_paths(self):
+        examples = (
+            "~~https://example.test/guide~~/" + "Users/alice/private",
+            "（https://example.test/guide）/" + "root/private",
+            "「https://example.test/guide」/%" + "2Fopt%2Fvendor%2Ftool",
+            "『https://example.test/guide』C%" + r"253A%255CUsers%255Calice%255Cprivate",
+            "【https://example.test/guide】/" + "Users/alice/private",
+            "〈https://example.test/guide〉/%" + "2Froot%2Fprivate",
+            "《https://example.test/guide》/%" + "252Fopt%252Fvendor",
+            "<https://example.test/guide>/%" + "252Fhome%252Falice%252Fprivate",
+            "~~https://example.test/guide~~=C%" + r"3A%5CUsers%5Calice%5Cprivate",
+            "_https://example.test/guide_&amp;amp;path=/" + "root/private",
+            "（ < ~~https://example.test/guide~~ > ）&amp;amp;path=%"
+            + "2525252FUsers%2525252Falice%2525252Fprivate",
+            "https://example.test/root/network-guide and "
+            "「https://example.test/guide」&path=/" + "Users/alice/private",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_wrapper_suffix_variants_all_fail_closed(self):
+        examples = (
+            "~~https://example.test/guide~~/" + "Users/alice/private",
+            "（https://example.test/guide）/%" + "2Froot%2Fprivate",
+            "「https://example.test/guide」/%" + "252Fopt%252Fvendor",
+            "<https://example.test/guide>/%" + "2525252Fhome%2525252Falice",
+            "『https://example.test/guide』/%ZZ/%" + "2FUsers%2Falice",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_gfm_cjk_and_autolink_wrappers_preserve_valid_urls(self):
+        examples = (
+            "~~https://example.test/release~notes/Users/alice/guide~~",
+            "（https://example.test/release's/root/guide）",
+            "「https://[2001:db8::1]:8443/a:b@c/opt/tool」",
+            "【https://example.test/release_notes/home/alice/guide】",
+            "〈https://example.test/release*notes/opt/tool〉",
+            "《https://example.test/release's/Users/alice/guide》",
+            "<https://example.test/release*notes/Users/alice/guide?x=one#part_two>",
+            "（ < ~~https://o'reilly@example.test/(stable)/root/guide~~ > ）",
+            "~~https://example.test/Users/alice/guide~~ and "
+            "「https://example.test/root/network-guide」",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
+    def test_uri_path_grammar_scan_has_linear_work(self):
+        class CountedString(str):
+            def __new__(cls, value, counts=None):
+                instance = super().__new__(cls, value)
+                instance.counts = counts if counts is not None else {"index": 0}
+                return instance
+
+            def __getitem__(self, key):
+                self.counts["index"] += 1
+                value = super().__getitem__(key)
+                if isinstance(key, slice):
+                    return type(self)(value, self.counts)
+                return value
+
+        def grammar_work(segments):
+            path = CountedString("/-._~!$&'()*+,;=:@%2F" * segments)
+            self.assertTrue(checker._has_valid_uri_path(path))
+            return path.counts["index"]
+
+        small_work = grammar_work(256)
+        large_work = grammar_work(512)
+        self.assertLessEqual(large_work, small_work * 2 + 8)
 
     def test_rfc_subdelimiters_and_document_wrappers_remain_valid_in_urls(self):
         examples = (

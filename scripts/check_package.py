@@ -41,6 +41,11 @@ HOSTNAME = re.compile(
 )
 USERINFO = re.compile(r"(?:[A-Za-z0-9._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})+")
 INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+URI_PATH_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    "-._~!$&'()*+,;=:@/"
+)
+HEXADECIMAL_CHARACTERS = frozenset("0123456789ABCDEFabcdef")
 AMBIGUOUS_URL_PREFIX_CHARACTERS = frozenset("_*'+-.%:/\\@")
 MAX_WRAPPER_CONTEXT_CHARACTERS = 4096
 MAX_WRAPPER_DEPTH = 32
@@ -57,8 +62,18 @@ WRAPPER_CLOSERS = {
     "_": "_",
     "__": "__",
     "`": "`",
+    "~~": "~~",
+    "（": "）",
+    "「": "」",
+    "『": "』",
+    "【": "】",
+    "〈": "〉",
+    "《": "》",
+    "<": ">",
 }
-SYMMETRIC_WRAPPERS = frozenset(("'", '"', "‘", "“", "*", "**", "_", "__", "`"))
+SYMMETRIC_WRAPPERS = frozenset(
+    ("'", '"', "‘", "“", "*", "**", "_", "__", "`", "~~")
+)
 NON_URI_DOCUMENT_DELIMITERS = frozenset(('"', "`", "‘", "’", "“", "”"))
 
 
@@ -115,9 +130,11 @@ def _is_wrapper_closer_boundary(candidate, end, outer_openers):
     if end == len(candidate):
         return True
     remainder = candidate[end:]
-    if remainder[0].isspace() or remainder[0] in URL_TRAILING_PUNCTUATION + "/\\%":
+    if remainder[0].isspace() or remainder[0] in URL_TRAILING_PUNCTUATION + "/\\%=":
         return True
     if any(remainder.startswith(WRAPPER_CLOSERS[opener]) for opener in outer_openers):
+        return True
+    if re.match(r"&(?:amp;)*(?:[A-Za-z_][A-Za-z0-9_.-]*)=", remainder):
         return True
     return re.match(r"[A-Za-z](?::|%[0-9A-Fa-f]{2})", remainder) is not None
 
@@ -210,7 +227,7 @@ def _split_url_candidate(candidate, leading_delimiters=()):
             break
         if (
             wrapper_openers
-            and wrapper_openers[0] in SYMMETRIC_WRAPPERS
+            and expected_closer not in closer_counts
             and candidate.startswith(expected_closer, index)
             and _is_wrapper_closer_boundary(
                 candidate, index + len(expected_closer), wrapper_openers[1:]
@@ -244,6 +261,26 @@ def _split_url_candidate(candidate, leading_delimiters=()):
         closer_counts[closer] -= 1
         end -= 1
     return candidate[:end], candidate[end:]
+
+
+def _has_valid_uri_path(path):
+    """Accept exactly RFC 3986 path pchars, separators, and percent triplets."""
+    index = 0
+    while index < len(path):
+        character = path[index]
+        if character == "%":
+            if (
+                index + 2 >= len(path)
+                or path[index + 1] not in HEXADECIMAL_CHARACTERS
+                or path[index + 2] not in HEXADECIMAL_CHARACTERS
+            ):
+                return False
+            index += 3
+            continue
+        if character not in URI_PATH_CHARACTERS:
+            return False
+        index += 1
+    return True
 
 
 def _bounded_percent_decodings(value):
@@ -335,6 +372,8 @@ def contains_machine_specific_path(content):
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not hostname:
             return scan_payload(candidate)
         if not _has_valid_http_authority(parsed):
+            return scan_payload(candidate)
+        if not _has_valid_uri_path(parsed.path):
             return scan_payload(candidate)
 
         # A URL path names a network resource, whereas query and fragment values
