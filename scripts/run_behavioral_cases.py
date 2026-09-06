@@ -7,16 +7,22 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "tests/behavioral-cases.json"
 RESULT_SCHEMA_VERSION = 1
 REQUEST_SCHEMA_VERSION = 1
+EXIT_SUCCESS = 0
+EXIT_CASE_FAILURE = 1
+EXIT_RUNNER_FAILURE = 2
+EXIT_INTERRUPTED = 130
+TIMEOUT_TERMINATION_SCOPE = "process-group" if os.name == "posix" else "evaluator-process"
 
 
 class RunnerError(Exception):
@@ -81,78 +87,131 @@ def dry_run(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def run_cases(
-    cases: list[dict[str, Any]], command: Sequence[str], timeout: float
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for case in cases:
-        request = request_for(case)
+def _terminate_evaluator(process: subprocess.Popen[str]) -> None:
+    """Stop the evaluator boundary without leaving POSIX descendants running."""
+    if os.name == "posix":
         try:
-            completed = subprocess.run(
-                list(command),
-                cwd=ROOT,
-                input=json.dumps(request, ensure_ascii=False) + "\n",
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            result = {
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _drain_evaluator(process: subprocess.Popen[str]) -> tuple[str, str]:
+    try:
+        return process.communicate(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return "", ""
+
+
+def run_case(
+    case: dict[str, Any], command: Sequence[str], timeout: float
+) -> dict[str, Any]:
+    request = request_for(case)
+    input_text = json.dumps(request, ensure_ascii=False) + "\n"
+
+    # A fresh writable directory is the complete filesystem boundary we can
+    # provide portably. POSIX additionally gets a fresh process group so a
+    # timeout or interrupt can terminate evaluator descendants as one unit.
+    with tempfile.TemporaryDirectory(prefix="behavioral-evaluator-") as workdir:
+        popen_options: dict[str, Any] = {
+            "cwd": workdir,
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        if os.name == "posix":
+            popen_options["start_new_session"] = True
+        elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        try:
+            process = subprocess.Popen(list(command), **popen_options)
+        except OSError as exc:
+            return {
+                "id": case["id"],
+                "status": "failed",
+                "request": request,
+                "error": {"kind": "launch", "message": str(exc)},
+            }
+
+        try:
+            stdout, stderr = process.communicate(input=input_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_evaluator(process)
+            stdout, stderr = _drain_evaluator(process)
+            result: dict[str, Any] = {
                 "id": case["id"],
                 "status": "failed",
                 "request": request,
                 "error": {
                     "kind": "timeout",
                     "message": f"evaluator exceeded {timeout:g} seconds",
+                    "terminationScope": TIMEOUT_TERMINATION_SCOPE,
                 },
             }
-            stdout = captured_text(exc.output)
-            stderr = captured_text(exc.stderr)
+            stdout = captured_text(stdout)
+            stderr = captured_text(stderr)
             if stdout:
                 result["response"] = stdout
             if stderr:
                 result["stderr"] = stderr
-            results.append(result)
-            continue
-        except OSError as exc:
-            results.append(
-                {
-                    "id": case["id"],
-                    "status": "failed",
-                    "request": request,
-                    "error": {"kind": "launch", "message": str(exc)},
-                }
-            )
-            continue
+            return result
+        except BaseException:
+            _terminate_evaluator(process)
+            _drain_evaluator(process)
+            raise
 
-        stdout = completed.stdout.rstrip("\n")
-        stderr = completed.stderr.rstrip("\n")
-        if completed.returncode == 0:
-            result: dict[str, Any] = {
-                "id": case["id"],
-                "status": "completed",
-                "request": request,
-                "response": stdout,
-            }
-            if stderr:
-                result["stderr"] = stderr
-        else:
-            result = {
-                "id": case["id"],
-                "status": "failed",
-                "request": request,
-                "error": {
-                    "kind": "exit",
-                    "message": f"evaluator exited with status {completed.returncode}",
-                    "exitCode": completed.returncode,
-                },
-            }
-            if stdout:
-                result["response"] = stdout
-            if stderr:
-                result["stderr"] = stderr
-        results.append(result)
+    stdout = captured_text(stdout)
+    stderr = captured_text(stderr)
+    if process.returncode == 0:
+        result = {
+            "id": case["id"],
+            "status": "completed",
+            "request": request,
+            "response": stdout,
+        }
+        if stderr:
+            result["stderr"] = stderr
+        return result
+
+    result = {
+        "id": case["id"],
+        "status": "failed",
+        "request": request,
+        "error": {
+            "kind": "exit",
+            "message": f"evaluator exited with status {process.returncode}",
+            "exitCode": process.returncode,
+        },
+    }
+    if stdout:
+        result["response"] = stdout
+    if stderr:
+        result["stderr"] = stderr
+    return result
+
+
+def run_cases(
+    cases: list[dict[str, Any]],
+    command: Sequence[str],
+    timeout: float,
+    on_result: Callable[[list[dict[str, Any]]], None] | None = None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for case in cases:
+        results.append(run_case(case, command, timeout))
+        if on_result is not None:
+            on_result(results)
     return results
 
 
@@ -186,6 +245,7 @@ def write_record(path: Path, record: dict[str, Any]) -> None:
     if output.is_symlink():
         raise RunnerError(f"refusing symlinked result path: {output}")
     parent = output.parent
+    temporary: Path | None = None
     try:
         parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -194,13 +254,17 @@ def write_record(path: Path, record: dict[str, Any]) -> None:
             temporary = Path(handle.name)
             json.dump(record, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         if output.is_symlink():
             raise RunnerError(f"refusing symlinked result path: {output}")
         temporary.replace(output)
+        temporary = None
     except OSError as exc:
-        if "temporary" in locals():
-            temporary.unlink(missing_ok=True)
         raise RunnerError(f"cannot write result: {exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -229,7 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.output or arguments.command:
                 raise RunnerError("--list does not accept --output or --command")
             print(json.dumps({"schemaVersion": 1, "cases": [case["id"] for case in cases]}, ensure_ascii=False))
-            return 0
+            return EXIT_SUCCESS
         if arguments.output is None:
             raise RunnerError("--output is required with --dry-run and --run")
         if arguments.timeout <= 0:
@@ -242,15 +306,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             if not arguments.command:
                 raise RunnerError("--command is required with --run")
-            results = run_cases(cases, arguments.command, arguments.timeout)
             mode = "run"
+            results = []
+            write_record(arguments.output, build_record(mode, arguments.cases, results))
+            results = run_cases(
+                cases,
+                arguments.command,
+                arguments.timeout,
+                on_result=lambda current: write_record(
+                    arguments.output, build_record(mode, arguments.cases, current)
+                ),
+            )
         record = build_record(mode, arguments.cases, results)
-        write_record(arguments.output, record)
+        if mode == "dry-run":
+            write_record(arguments.output, record)
         print(json.dumps(record["summary"], ensure_ascii=False))
-        return 1 if record["summary"]["failed"] else 0
+        return EXIT_CASE_FAILURE if record["summary"]["failed"] else EXIT_SUCCESS
+    except KeyboardInterrupt:
+        print(json.dumps({"error": "interrupted; completed results were preserved"}), file=sys.stderr)
+        return EXIT_INTERRUPTED
     except RunnerError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
-        return 2
+        return EXIT_RUNNER_FAILURE
+    except Exception as exc:
+        print(
+            json.dumps(
+                {"error": f"runner failure: {type(exc).__name__}: {exc}"},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_RUNNER_FAILURE
 
 
 if __name__ == "__main__":
