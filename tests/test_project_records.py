@@ -6,8 +6,10 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 import sys
@@ -231,6 +233,116 @@ class ProjectRecordsTests(unittest.TestCase):
         agents.chmod(0o640)
         self.apply()
         self.assertEqual(stat.S_IMODE(agents.stat().st_mode), 0o640)
+
+    def test_real_crash_during_first_write_keeps_restricted_original_and_temporary(self):
+        agents = self.root / "AGENTS.md"
+        original = b"Existing restricted rules\n"
+        agents.write_bytes(original)
+        agents.chmod(0o600)
+        (self.root / "docs").mkdir()
+        (self.root / "docs/commander.md").write_bytes(b"# Existing plan\n")
+        marker = self.root.parent / f"{self.root.name}-first-write"
+        self.addCleanup(marker.unlink, missing_ok=True)
+        child = r'''
+import os
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, sys.argv[1])
+import project_records as records
+
+root = Path(sys.argv[2])
+marker = Path(sys.argv[3])
+os.umask(0o022)
+real_fdopen = os.fdopen
+
+class PausingWriter:
+    def __init__(self, *args, **kwargs):
+        self.handle = real_fdopen(*args, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return self.handle.__exit__(*args)
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def write(self, content):
+        written = self.handle.write(content)
+        self.handle.flush()
+        marker.write_text("ready")
+        while True:
+            time.sleep(1)
+        return written
+
+records.os.fdopen = PausingWriter
+plan = records.plan_records(root, "en", "maintainable", "A local tool")
+records.apply_plan(plan)
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-c", child, str(Path(records.__file__).parent), str(self.root), str(marker)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        temporary_paths = []
+        temporary_mode = None
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not marker.exists():
+                stderr = process.communicate(timeout=1)[1] if process.poll() is not None else "child did not reach first write"
+                self.fail(stderr)
+            temporary_paths = list(self.root.glob(".commander-*"))
+            self.assertEqual(len(temporary_paths), 1)
+            temporary_mode = stat.S_IMODE(temporary_paths[0].stat().st_mode)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.stderr.close()
+
+        self.assertEqual(process.returncode, -9)
+        self.assertEqual(agents.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(agents.stat().st_mode), 0o600)
+        self.assertTrue(temporary_paths[0].exists())
+        self.assertNotEqual(temporary_paths[0].read_bytes(), b"")
+        self.assertEqual(stat.S_IMODE(temporary_paths[0].stat().st_mode), temporary_mode)
+        self.assertEqual(temporary_mode & ~0o600, 0)
+
+    def test_new_temporary_files_are_private_before_first_write(self):
+        observed_modes = []
+        real_fdopen = os.fdopen
+
+        class InspectingWriter:
+            def __init__(self, *args, **kwargs):
+                self.handle = real_fdopen(*args, **kwargs)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return self.handle.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+            def write(self, content):
+                observed_modes.append(stat.S_IMODE(os.fstat(self.handle.fileno()).st_mode))
+                return self.handle.write(content)
+
+        previous_umask = os.umask(0o022)
+        try:
+            with mock.patch.object(records.os, "fdopen", InspectingWriter):
+                self.apply()
+        finally:
+            os.umask(previous_umask)
+
+        self.assertEqual(observed_modes, [0o600, 0o600])
 
     def test_new_files_use_normal_creation_permissions(self):
         reference = self.root / "reference"

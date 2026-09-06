@@ -350,12 +350,28 @@ def write_temporary(parent_fd: int, path: Path, content: bytes, mode: int | None
     for _ in range(100):
         temporary = f".commander-{uuid.uuid4().hex}"
         try:
-            descriptor = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o666,
-                dir_fd=parent_fd,
-            )
+            if mode is None:
+                # Capture the caller's normal file mode while forcing this carrier
+                # private until all content has been handed to the file object.
+                previous_umask = os.umask(0o077)
+                try:
+                    descriptor = os.open(
+                        temporary,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o666,
+                        dir_fd=parent_fd,
+                    )
+                finally:
+                    os.umask(previous_umask)
+                final_mode = 0o666 & ~previous_umask
+            else:
+                descriptor = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    mode,
+                    dir_fd=parent_fd,
+                )
+                final_mode = mode
         except FileExistsError:
             continue
         break
@@ -364,9 +380,8 @@ def write_temporary(parent_fd: int, path: Path, content: bytes, mode: int | None
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
-            if mode is not None:
-                os.fchmod(handle.fileno(), mode)
             handle.flush()
+            os.fchmod(handle.fileno(), final_mode)
             os.fsync(handle.fileno())
     except BaseException:
         try:
