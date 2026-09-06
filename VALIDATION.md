@@ -2,7 +2,11 @@
 
 Version: 0.2.0. Date: 2026-09-06.
 
-## Automated checks
+## Historical automated-check snapshot (pre-integration)
+
+This table is a preserved pre-integration snapshot, not evidence for the
+integrated candidate documented below. Its 61-test count and clean package
+check applied to that earlier source snapshot only.
 
 | Check | Observed result |
 | --- | --- |
@@ -27,12 +31,13 @@ The package's own tests and helpers use only the standard library. The separate
 bundled Codex validator needed PyYAML, which was supplied in an isolated tool
 environment rather than added as a runtime dependency of this skill.
 
-## Version 0.2.0 release-candidate evidence (unreleased)
+## Historical v0.2.0 local-candidate snapshot
 
-The following checks were run locally on macOS on 2026-09-06 and describe that
-then-current working tree. `Intended tag: v0.2.0` labels a local candidate only;
-it is not evidence of a local or remote Git tag. A remote tag and a GitHub
-Release must be verified separately.
+The following checks were run locally on macOS on 2026-09-06 and describe an
+earlier local-candidate snapshot, before later integrated changes. Its 61-test
+count and clean package check are historical only. `Intended tag: v0.2.0` labels
+a local candidate only; it is not evidence of a local or remote Git tag. A
+remote tag and a GitHub Release must be verified separately.
 
 | Check | Observed result |
 | --- | --- |
@@ -66,11 +71,12 @@ verifies only internal version, file-set, and hash consistency; it does not prov
 source provenance, a local or remote Git tag, a GitHub Release, or resistance to
 malicious tampering.
 
-## COD-16 publication-boundary verification
+## COD-16 integrated-candidate verification
 
-This verification was run locally on macOS on 2026-09-06 against the integrated
-candidate. It is local evidence, not a hosted CI run, a remote-tag check, or a
-GitHub Release check.
+This verification was run locally on macOS on 2026-09-06 against the later
+integrated candidate. Its 71-test count supersedes the earlier 61-test snapshots
+above for this candidate. It is local evidence, not a hosted CI run, a
+remote-tag check, or a GitHub Release check.
 
 | Check | Observed result |
 | --- | --- |
@@ -218,7 +224,8 @@ host tests before unattended use. Raw local probe outputs are not distributed.
 
 - Live sidebar creation and callback delivery for this skill version.
 - Reliable wake-up after app shutdown, quota exhaustion, or interruption.
-- Exactly-once delivery, crash-safe transactions, or concurrent record writers.
+- Exactly-once delivery, crash-safe transactions, or external/non-cooperating
+  record writers that do not follow the helper's kernel advisory lock.
 - Lower token cost, faster completion, or universally improved output quality.
 - Windows/Linux execution testing or exhaustive support for other languages.
 

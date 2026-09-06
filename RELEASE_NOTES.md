@@ -51,8 +51,9 @@ and must be verified in their respective services.
 
 ## Maintainer release sequence
 
-After human acceptance, verify the reviewed local candidate, then create and
-verify the annotated remote tag `v0.2.0`, generate any distribution archive from
-that verified tag, and separately publish and verify the GitHub Release with its
-archive checksum. The local candidate, remote tag, and GitHub Release remain
-distinct checkpoints.
+After human acceptance, create and verify the local annotated tag `v0.2.0` on
+the reviewed commit. Only after separate human approval, push it and verify the
+remote tag resolves to that same commit. Generate any distribution archive from
+the verified tag, then separately publish and verify the GitHub Release with its
+archive checksum. The local candidate, local tag, remote tag, and GitHub Release
+remain distinct checkpoints.
