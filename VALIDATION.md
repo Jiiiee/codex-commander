@@ -103,8 +103,8 @@ checksum manifest before the final gate is repeated.
 
 | Check | Observed result |
 | --- | --- |
-| `python3.11 -B -m unittest discover -s tests -v` | 116 tests passed. |
-| `python3.12 -B -m unittest discover -s tests -v` | 116 tests passed. |
+| `python3.11 -B -m unittest discover -s tests -v` | 122 tests passed. |
+| `python3.12 -B -m unittest discover -s tests -v` | 122 tests passed. |
 | `python3.11 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | `python3.12 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
@@ -116,10 +116,11 @@ consistency only. The provenance and publication limitations stated above still
 apply.
 
 The package checker's URL portability scan treats an ambiguous wrapped URL
-followed by a short `token=machine-path` residual as unsafe and fails closed.
-This is a deliberate safety boundary: network paths that would otherwise be
-ambiguous should use an explicit Markdown link or autolink form. Residual-token
-scanning uses a structurally delimited 64-character bound and a source window
+followed by bounded, interleaved residual tokens and structural separators that
+lead to `token=machine-path` as unsafe and fails closed. This is a deliberate
+safety boundary: network paths that would otherwise be ambiguous should use an
+explicit Markdown link or autolink form. Residual scanning applies separate
+64-character bounds to token and separator characters and a source window
 derived from the three-layer percent-decoding limit; truncation, incomplete
 tokens, invalid escapes, and exhausted decode depth also fail closed.
 
