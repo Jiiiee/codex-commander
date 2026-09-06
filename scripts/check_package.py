@@ -30,6 +30,13 @@ MACHINE_SPECIFIC_PATHS = (
     re.compile(r"[A-Za-z]:[\\\\/](?:Users|ProgramData|home)[\\\\/][^\s`'\"<>()\[\]]+"),
     re.compile(r"\\\\[^\\\\/\s]+\\(?:Users|ProgramData|home)\\[^\s`'\"<>()\[\]]+"),
 )
+URL = re.compile(r"https?://[^\s`'\"<>()\[\]]+", re.I)
+
+
+def contains_machine_specific_path(content):
+    """Ignore URL path components while still checking literal filesystem paths."""
+    without_urls = URL.sub(lambda match: " " * len(match.group()), content)
+    return any(pattern.search(without_urls) for pattern in MACHINE_SPECIFIC_PATHS)
 
 
 def check_version(root, errors):
@@ -259,7 +266,7 @@ def check(root=ROOT):
         except UnicodeDecodeError:
             errors.append(f"Non-UTF-8 text: {relative}")
             continue
-        if any(pattern.search(content) for pattern in MACHINE_SPECIFIC_PATHS):
+        if contains_machine_specific_path(content):
             errors.append(f"Machine-specific path: {relative}")
         if re.search(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", content, re.I):
             errors.append(f"Potential private runtime ID: {relative}")

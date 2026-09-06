@@ -125,6 +125,7 @@ class CheckPackageTests(unittest.TestCase):
             "/opt" + "/vendor/bin/tool",
             "/root" + "/private/project",
             "/Users" + "/example/project",
+            "/home" + "/example/project",
             "C:" + r"\Users\example\project",
             "\\" * 2 + "host" + "\\" + "Users" + "\\example\\project",
         )
@@ -134,6 +135,19 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 readme.write_text(original + "\n" + example + "\n", encoding="utf-8")
                 self.assertIn("Machine-specific path: README.md", self.errors())
+
+    def test_machine_path_components_in_http_urls_are_allowed(self):
+        examples = (
+            "https://example.com/opt/tool",
+            "https://example.com/root/guide",
+            "https://example.com/Users/example/project",
+        )
+        readme = self.root / "README.md"
+        original = readme.read_text(encoding="utf-8")
+        for example in examples:
+            with self.subTest(example=example):
+                readme.write_text(original + "\n" + example + "\n", encoding="utf-8")
+                self.assertNotIn("Machine-specific path: README.md", self.errors())
 
     def test_documented_generic_tmp_path_is_allowed(self):
         readme = self.root / "README.md"
