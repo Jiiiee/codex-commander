@@ -32,7 +32,7 @@ MACHINE_SPECIFIC_PATHS = (
     re.compile(r"[A-Za-z]:[\\\\/](?:Users|ProgramData|home)[\\\\/][^\s`'\"<>()\[\]]+"),
     re.compile(r"\\\\[^\\\\/\s]+\\(?:Users|ProgramData|home)\\[^\s`'\"<>()\[\]]+"),
 )
-URL = re.compile(r"https?://[^\s`'\"<>]+", re.I)
+URL = re.compile(r"https?://(?:(?!https?://)[^\s`\"<>])+", re.I)
 URL_TRAILING_PUNCTUATION = ".,;:!?"
 MAX_PERCENT_DECODE_LAYERS = 3
 HOSTNAME = re.compile(
@@ -43,22 +43,43 @@ USERINFO = re.compile(r"(?:[A-Za-z0-9._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})+")
 INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
-def _split_url_candidate(candidate):
+def _split_url_candidate(candidate, leading_delimiter=None):
     """Separate sentence/Markdown closers without imposing URI path balance."""
+    opener_counts = {"(": 0, "[": 0}
+    closer_counts = {")": 0, "]": 0}
+    matching_opener = {")": "(", "]": "["}
+
+    # The character immediately before a URL tells us whether an otherwise legal
+    # URI delimiter closes surrounding Markdown/sentence syntax.  Walk once so a
+    # balanced delimiter inside the URI remains part of its path, while the first
+    # unmatched closer for that surrounding wrapper terminates the URL span.
     end = len(candidate)
+    for index in range(end):
+        character = candidate[index]
+        if character in opener_counts:
+            opener_counts[character] += 1
+        elif character in closer_counts:
+            opener = matching_opener[character]
+            if opener_counts[opener] > closer_counts[character]:
+                closer_counts[character] += 1
+            elif leading_delimiter == opener:
+                end = index
+                break
+            else:
+                closer_counts[character] += 1
+
     while end and candidate[end - 1] in URL_TRAILING_PUNCTUATION:
         end -= 1
 
-    # Parentheses are legal URI path characters, including an unmatched opening
-    # parenthesis.  Trim only excess closing delimiters at the candidate's end;
-    # this preserves balanced URL path components while removing Markdown and
-    # sentence wrappers such as ``[label](https://example.test/path)``.
-    while end and candidate[end - 1] in ")]":
+    # When there is no surrounding wrapper boundary, trim only excess closing
+    # delimiters at the end.  The counts above are decremented as the reverse scan
+    # advances, avoiding repeated whole-prefix ``count`` calls and keeping O(n).
+    while end and candidate[end - 1] in closer_counts:
         closer = candidate[end - 1]
-        opener = "(" if closer == ")" else "["
-        prefix = candidate[:end]
-        if prefix.count(closer) <= prefix.count(opener):
+        opener = matching_opener[closer]
+        if closer_counts[closer] <= opener_counts[opener]:
             break
+        closer_counts[closer] -= 1
         end -= 1
     return candidate[:end], candidate[end:]
 
@@ -131,10 +152,13 @@ def contains_machine_specific_path(content):
 
     def replace_url(match):
         candidate = match.group()
-        split_candidate = _split_url_candidate(candidate)
+        leading_delimiter = match.string[match.start() - 1] if match.start() else None
+        split_candidate = _split_url_candidate(candidate, leading_delimiter)
         if split_candidate is None:
             return scan_payload(candidate)
         url, suffix = split_candidate
+        if INVALID_PERCENT_ESCAPE.search(url):
+            return scan_payload(candidate)
         try:
             parsed = urlsplit(url)
             hostname = parsed.hostname

@@ -170,9 +170,9 @@ class CheckPackageTests(unittest.TestCase):
             "https://example.test/docs?source=/" + "home/alice/private.txt",
             r"https://example.test/upload?source=C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
             "https://[2001:db8::1]/(stable)/opt/tool?source=/" + "Users/alice/private.txt",
-            "https://[2001:db8::1]/(stable)/root/guide?source=%" + "2Fopt%2Fvendor%2Ftool",
+            "https://[2001:db8::1]/(stable)/" + "root/guide?source=%" + "2Fopt%2Fvendor%2Ftool",
             r"https://example.test/(stable)/Users/guide#source=C:" + r"\Users\alice\private.txt",
-            r"https://example.test/(stable)/root/guide#source=C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
+            r"https://example.test/(stable)/" + "root/guide#source=C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
         )
         readme = self.root / "README.md"
         original = readme.read_text(encoding="utf-8")
@@ -224,10 +224,45 @@ class CheckPackageTests(unittest.TestCase):
             "https://[2001:db8::1]/%2FUsers%2Falice%2Fguide",
             "https://[2001:db8::1]:8443/%2Froot%2Fguide",
             "https://example.test:443/releases/(stable)/%2Fopt%2Ftool",
+            "https://o'reilly@example.test/Users/alice/guide",
+            "https://example.test/release's/Users/alice/guide",
+            "https://example.test/o'reilly/opt/tool",
+            "https://example.test/releases/[stable]/Users/alice/guide",
+            "https://example.test/Users/alice,https://example.test/root/guide",
         )
         for example in examples:
             with self.subTest(example=example):
                 self.assertFalse(checker.contains_machine_specific_path(example))
+
+    def test_invalid_percent_escapes_anywhere_in_url_fail_closed(self):
+        examples = (
+            "https://example.test/%ZZ/%" + "2FUsers%2Falice%2Fprivate",
+            "https://example.test/%2/%" + "2Froot%2Fprivate",
+            "https://example.test/%GG/%" + "2Fopt%2Fvendor%2Ftool",
+            r"https://example.test/%ZZ/C%" + r"3A%5CUsers%5Calice%5Cprivate",
+            r"https://example.test/%2/C%" + r"3A%5CUsers%5Calice%5Cprivate",
+            r"https://example.test/%GG/C%" + r"3A%5CUsers%5Calice%5Cprivate",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_markdown_or_sentence_closers_cannot_absorb_machine_paths(self):
+        examples = (
+            "[docs](https://example.test/guide)/" + "Users/alice/private",
+            "See (https://example.test/guide)/" + "root/private",
+            "[docs](https://example.test/(stable))/" + "opt/vendor/tool",
+            "[https://example.test/releases/[stable]]/" + "Users/alice/private",
+            "[[docs]]((https://example.test/(stable)))/" + "root/private",
+            "See (https://[2001:db8::1]/(stable))/" + "opt/vendor/tool",
+            "[docs](https://example.test/guide?next=public#section)/" + "Users/alice/private",
+            "[docs](https://example.test/guide),/" + "root/private",
+            "See (https://example.test/guide)/" + "Users/alice/private "
+            "https://example.test/root/network-guide",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
 
     def test_nested_percent_encoding_cannot_hide_machine_paths_in_url_parameters(self):
         examples = (
@@ -282,6 +317,35 @@ class CheckPackageTests(unittest.TestCase):
             checker._split_url_candidate("https://example.test/(stable)/Users/guide)."),
             ("https://example.test/(stable)/Users/guide", ")."),
         )
+
+    def test_url_candidate_trimming_has_linear_scan_work(self):
+        class CountedString(str):
+            def __new__(cls, value, counts=None):
+                instance = super().__new__(cls, value)
+                instance.counts = counts if counts is not None else {"index": 0, "count_work": 0}
+                return instance
+
+            def __getitem__(self, key):
+                self.counts["index"] += 1
+                value = super().__getitem__(key)
+                if isinstance(key, slice):
+                    return type(self)(value, self.counts)
+                return value
+
+            def count(self, *args, **kwargs):
+                self.counts["count_work"] += len(self)
+                return super().count(*args, **kwargs)
+
+        def trimming_work(closers):
+            candidate = CountedString("https://example.test/guide" + ")" * closers)
+            url, suffix = checker._split_url_candidate(candidate)
+            self.assertEqual(url, "https://example.test/guide")
+            self.assertEqual(suffix, ")" * closers)
+            return candidate.counts["index"] + candidate.counts["count_work"]
+
+        small_work = trimming_work(512)
+        large_work = trimming_work(1024)
+        self.assertLessEqual(large_work, small_work * 2 + 32)
 
     def test_documented_generic_tmp_path_is_allowed(self):
         readme = self.root / "README.md"
