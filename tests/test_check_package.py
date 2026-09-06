@@ -574,6 +574,90 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_wrapper_closer_uri_component_stops_trigger_safe_scan(self):
+        examples = (
+            "~~https://example.test/guide~~foo/" + "Users/alice/private",
+            "~~https://example.test/guide~~foo%2F" + "Users%2Falice%2Fprivate",
+            "~~https://example.test/guide~~foo%23bar/" + "Users/alice/private",
+            "~~https://example.test/guide~~foo%3Fbar/" + "opt/vendor/tool",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_uri_component_stop_residuals_cross_raw_encoded_and_token_matrix(self):
+        def encode_every_byte(value):
+            return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))
+
+        component_stops = ("/", "?", "#")
+        short_tokens = ("a", "key", "路径")
+        for stop in component_stops:
+            for token in short_tokens:
+                raw_residual = token + stop + "part/" + "Users/alice/private"
+                encoded_residual = (
+                    token
+                    + encode_every_byte(stop)
+                    + "part"
+                    + encode_every_byte("/" + "Users/alice/private")
+                )
+                for encoding, residual in (
+                    ("raw", raw_residual),
+                    ("encoded", encoded_residual),
+                ):
+                    example = "~~https://example.test/guide~~" + residual
+                    with self.subTest(stop=stop, token=token, encoding=encoding):
+                        self.assertTrue(
+                            checker.contains_machine_specific_path(example)
+                        )
+
+    def test_uri_component_stop_residual_bounds_and_decode_layers_fail_closed(self):
+        def encode_every_byte(value):
+            return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))
+
+        maximum = (
+            "x" * (checker.MAX_RESIDUAL_TOKEN_CHARACTERS - len("key"))
+            + "?key=/"
+            + "Users/alice/private"
+        )
+        overflow = "x" + maximum
+        self.assertEqual(
+            checker._raw_residual_boundary(maximum, 0),
+            (True, False, False),
+        )
+        self.assertEqual(
+            checker._raw_residual_boundary(overflow, 0),
+            (False, False, True),
+        )
+
+        decoded = "key#part/" + "Users/alice/private"
+        decoded_layers = []
+        for _ in range(checker.MAX_PERCENT_DECODE_LAYERS):
+            decoded = encode_every_byte(decoded)
+            decoded_layers.append(decoded)
+        rejected = (
+            "~~https://example.test/guide~~" + maximum,
+            "~~https://example.test/guide~~" + overflow,
+            *("~~https://example.test/guide~~" + value for value in decoded_layers),
+        )
+        for example in rejected:
+            with self.subTest(example=example[:120]):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_uri_component_stop_residual_rule_preserves_explicit_url_forms(self):
+        examples = (
+            "[guide](https://example.test/release/"
+            + "Users/alice/guide?topic=private#section)",
+            "<https://example.test/release/"
+            + "opt/vendor/tool?topic=private#section>",
+            "[guide](https://example.test/release%2F"
+            + "Users%2Falice/guide?topic=private#section)",
+            "<https://example.test/release%2F"
+            + "opt%2Fvendor/tool?topic=private#section>",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
     def test_wrapper_separator_sequences_are_bounded_and_encoding_complete(self):
         def encode_every_byte(value):
             return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))

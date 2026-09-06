@@ -95,11 +95,13 @@ WRAPPER_CLOSERS = {
     "《": "》",
     "<": ">",
 }
-# Separate document punctuation from URI component stops using the tokenizer's
-# structural grammar.  The bounded probe may cross an alternating sequence of
-# residual tokens and such separators to find a residual assignment.
+# Once a recognized wrapper closer starts the residual state machine, every
+# structural delimiter except the two control characters handled separately
+# below is an ambiguous separator.  Keeping this category grammar-derived lets
+# raw and decoded URI component stops follow the same bounded/restart rules as
+# document punctuation instead of becoming punctuation-specific safe exits.
 AMBIGUOUS_RESIDUAL_SEPARATOR_CHARACTERS = frozenset(
-    RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS.difference("=%/\\?#")
+    RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS.difference("=%")
 )
 SYMMETRIC_WRAPPERS = frozenset(
     ("'", '"', "‘", "“", "*", "**", "_", "__", "`", "~~")
@@ -186,7 +188,9 @@ def _decoded_html_prefix(value):
     return index, False
 
 
-def _decoded_boundary_kind(value, allow_token, restart_closer=None):
+def _decoded_boundary_kind(
+    value, allow_token, restart_closer=None, terminal_closers=()
+):
     """用固定上界识别已解码的 wrapper 残余结构。"""
     index = 0
     separator_characters = 0
@@ -207,13 +211,19 @@ def _decoded_boundary_kind(value, allow_token, restart_closer=None):
 
     token_length = 0
     token_characters = 0
+    has_restarted = False
     while index < len(value):
         if restart_closer and value.startswith(restart_closer, index):
             index += len(restart_closer)
             separator_characters = 0
             token_length = 0
             token_characters = 0
+            has_restarted = True
             continue
+        if has_restarted and any(
+            value.startswith(closer, index) for closer in terminal_closers
+        ):
+            return False, False
         character = value[index]
         if character == "=":
             return token_length > 0, False
@@ -276,7 +286,13 @@ def _ambiguous_residual_separator_end(value, index):
     return index + 1, False
 
 
-def _bounded_boundary_probe(candidate, start, allow_token, restart_closer=None):
+def _bounded_boundary_probe(
+    candidate,
+    start,
+    allow_token,
+    restart_closer=None,
+    terminal_closers=(),
+):
     """在推导出的固定源窗口内解码；任何不完整状态均 fail-closed。"""
     source_end = min(len(candidate), start + MAX_RESIDUAL_SOURCE_CHARACTERS)
     source = candidate[start:source_end]
@@ -290,14 +306,16 @@ def _bounded_boundary_probe(candidate, start, allow_token, restart_closer=None):
         return False, True
     for layer in layers:
         matched, exhausted = _decoded_boundary_kind(
-            layer, allow_token, restart_closer
+            layer, allow_token, restart_closer, terminal_closers
         )
         if matched or exhausted:
             return matched, exhausted
     return False, False
 
 
-def _raw_residual_boundary(candidate, start, restart_closer=None):
+def _raw_residual_boundary(
+    candidate, start, restart_closer=None, terminal_closers=()
+):
     """线性扫描 raw 短 token 和连续结构分隔符；percent 交给 probe。"""
     if start >= len(candidate):
         return False, False, False
@@ -308,13 +326,19 @@ def _raw_residual_boundary(candidate, start, restart_closer=None):
     token_length = 0
     token_characters = 0
     separator_characters = 0
+    has_restarted = False
     while index < len(candidate):
         if restart_closer and candidate.startswith(restart_closer, index):
             index += len(restart_closer)
             separator_characters = 0
             token_length = 0
             token_characters = 0
+            has_restarted = True
             continue
+        if has_restarted and any(
+            candidate.startswith(closer, index) for closer in terminal_closers
+        ):
+            return False, False, False
         character = candidate[index]
         if character == "=":
             return token_length > 0, False, False
@@ -353,8 +377,9 @@ def _is_wrapper_closer_boundary(candidate, end, closer, outer_openers):
         return True
     if any(candidate.startswith(WRAPPER_CLOSERS[opener], end) for opener in outer_openers):
         return True
+    outer_closers = tuple(WRAPPER_CLOSERS[opener] for opener in outer_openers)
     residual, requires_probe, exhausted = _raw_residual_boundary(
-        candidate, end, closer
+        candidate, end, closer, outer_closers
     )
     if exhausted:
         return None
@@ -362,7 +387,11 @@ def _is_wrapper_closer_boundary(candidate, end, closer, outer_openers):
         return True
     if requires_probe:
         residual, exhausted = _bounded_boundary_probe(
-            candidate, end, allow_token=True, restart_closer=closer
+            candidate,
+            end,
+            allow_token=True,
+            restart_closer=closer,
+            terminal_closers=outer_closers,
         )
         if exhausted:
             return None
@@ -464,7 +493,9 @@ def _bounded_wrapper_tail(content, start, wrapper_openers):
     return (content[start:index] if consumed_closer else ""), exhausted
 
 
-def _split_url_candidate(candidate, leading_delimiters=()):
+def _split_url_candidate(
+    candidate, leading_delimiters=(), has_external_wrapper_closer=False
+):
     """Separate sentence/Markdown closers without imposing URI path balance."""
     if isinstance(leading_delimiters, str):
         wrapper_openers = (leading_delimiters,)
@@ -506,6 +537,8 @@ def _split_url_candidate(candidate, leading_delimiters=()):
                 wrapper_openers[1:],
             )
             if boundary is None:
+                if has_external_wrapper_closer:
+                    continue
                 return None
             if boundary:
                 end = index
@@ -643,7 +676,19 @@ def contains_machine_specific_path(content):
             return scan_candidate()
         split_candidate = _split_url_candidate(candidate, wrapper_openers)
         if split_candidate is None:
-            return scan_candidate()
+            external_wrapper_tail, external_wrapper_limit_exhausted = (
+                _bounded_wrapper_tail(match.string, match.end(), wrapper_openers)
+            )
+            if external_wrapper_limit_exhausted:
+                decode_limit_exhausted = True
+            if external_wrapper_tail:
+                split_candidate = _split_url_candidate(
+                    candidate,
+                    wrapper_openers,
+                    has_external_wrapper_closer=True,
+                )
+            if split_candidate is None:
+                return scan_candidate()
         url, suffix = split_candidate
         if (
             INVALID_PERCENT_ESCAPE.search(url)
