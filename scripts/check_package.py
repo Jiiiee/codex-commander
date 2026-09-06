@@ -90,24 +90,29 @@ def _has_valid_http_authority(parsed):
     return HOSTNAME.fullmatch(ascii_hostname) is not None
 
 
+def _ambiguous_url_scan_payload(candidate):
+    """Expose raw and once-decoded ambiguous URL text to local-path checks."""
+    return "\n".join((candidate, unquote(candidate)))
+
+
 def contains_machine_specific_path(content):
     """Ignore HTTP(S) network paths while scanning URL parameters for local paths."""
     def replace_url(match):
         candidate = match.group()
         split_candidate = _split_url_candidate(candidate)
         if split_candidate is None:
-            return candidate
+            return _ambiguous_url_scan_payload(candidate)
         url, suffix = split_candidate
         try:
             parsed = urlsplit(url)
             hostname = parsed.hostname
             parsed.port  # Access validates a malformed or out-of-range port.
         except ValueError:
-            return candidate  # Do not hide text we cannot confidently interpret as a URL.
+            return _ambiguous_url_scan_payload(candidate)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not hostname:
-            return candidate
+            return _ambiguous_url_scan_payload(candidate)
         if not _has_valid_http_authority(parsed):
-            return candidate
+            return _ambiguous_url_scan_payload(candidate)
 
         # A URL path names a network resource, whereas query and fragment values
         # commonly carry local filenames.  Scan both their literal and decoded

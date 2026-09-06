@@ -190,6 +190,27 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_malformed_urls_with_encoded_machine_paths_fail_closed(self):
+        examples = (
+            "https://[not-an-ipv6]/%" + "2FUsers%2Falice%2Fprivate.txt",
+            "https://example.test:invalid/%" + "2Froot%2Fprivate",
+            r"https://foo[bar]/C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
+            "https://example.test/releases/(stable/%" + "2Fopt%2Fvendor%2Ftool",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_valid_urls_keep_network_paths_exempt_from_machine_path_checks(self):
+        examples = (
+            "https://[2001:db8::1]/%2FUsers%2Falice%2Fguide",
+            "https://[2001:db8::1]:8443/%2Froot%2Fguide",
+            "https://example.test:443/releases/(stable)/%2Fopt%2Ftool",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
     def test_documented_generic_tmp_path_is_allowed(self):
         readme = self.root / "README.md"
         example = "/tmp/codex-commander-behavioral-results.json"
