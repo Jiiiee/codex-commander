@@ -103,8 +103,8 @@ checksum manifest before the final gate is repeated.
 
 | Check | Observed result |
 | --- | --- |
-| `python3.11 -B -m unittest discover -s tests -v` | 106 tests passed. |
-| `python3.12 -B -m unittest discover -s tests -v` | 106 tests passed. |
+| `python3.11 -B -m unittest discover -s tests -v` | 110 tests passed. |
+| `python3.12 -B -m unittest discover -s tests -v` | 110 tests passed. |
 | `python3.11 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | `python3.12 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
