@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import sys
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIP = {".git", "__pycache__", ".local-evaluation", "dist"}
@@ -34,8 +35,28 @@ URL = re.compile(r"https?://[^\s`'\"<>()\[\]]+", re.I)
 
 
 def contains_machine_specific_path(content):
-    """Ignore URL path components while still checking literal filesystem paths."""
-    without_urls = URL.sub(lambda match: " " * len(match.group()), content)
+    """Ignore HTTP(S) network paths while scanning URL parameters for local paths."""
+    def replace_url(match):
+        url = match.group()
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return url  # Do not hide text we cannot confidently interpret as a URL.
+        if not parsed.netloc:
+            return url
+
+        # A URL path names a network resource, whereas query and fragment values
+        # commonly carry local filenames.  Scan both their literal and decoded
+        # forms so percent-encoding cannot bypass the package check.
+        parameters = "\n".join((
+            parsed.query,
+            unquote(parsed.query),
+            parsed.fragment,
+            unquote(parsed.fragment),
+        ))
+        return parameters
+
+    without_urls = URL.sub(replace_url, content)
     return any(pattern.search(without_urls) for pattern in MACHINE_SPECIFIC_PATHS)
 
 

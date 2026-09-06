@@ -149,6 +149,22 @@ class CheckPackageTests(unittest.TestCase):
                 readme.write_text(original + "\n" + example + "\n", encoding="utf-8")
                 self.assertNotIn("Machine-specific path: README.md", self.errors())
 
+    def test_machine_paths_in_http_url_query_and_fragment_are_rejected(self):
+        examples = (
+            "https://example.test/upload?source=/" + "Users/alice/private.txt",
+            "https://example.test/upload?source=%" + "2FUsers%2Falice%2Fprivate.txt",
+            "https://example.test/docs#/" + "root/private/project",
+            "https://example.test/docs#%" + "2Fopt%2Fvendor%2Fbin%2Ftool",
+            "https://example.test/docs?source=/" + "home/alice/private.txt",
+            r"https://example.test/upload?source=C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
+        )
+        readme = self.root / "README.md"
+        original = readme.read_text(encoding="utf-8")
+        for example in examples:
+            with self.subTest(example=example):
+                readme.write_text(original + "\n" + example + "\n", encoding="utf-8")
+                self.assertIn("Machine-specific path: README.md", self.errors())
+
     def test_documented_generic_tmp_path_is_allowed(self):
         readme = self.root / "README.md"
         example = "/tmp/codex-commander-behavioral-results.json"
