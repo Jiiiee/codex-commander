@@ -3,6 +3,7 @@
 
 import ast
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -31,19 +32,82 @@ MACHINE_SPECIFIC_PATHS = (
     re.compile(r"[A-Za-z]:[\\\\/](?:Users|ProgramData|home)[\\\\/][^\s`'\"<>()\[\]]+"),
     re.compile(r"\\\\[^\\\\/\s]+\\(?:Users|ProgramData|home)\\[^\s`'\"<>()\[\]]+"),
 )
-URL = re.compile(r"https?://[^\s`'\"<>()\[\]]+", re.I)
+URL = re.compile(r"https?://[^\s`'\"<>]+", re.I)
+URL_TRAILING_PUNCTUATION = ".,;:!?"
+HOSTNAME = re.compile(
+    r"(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)"
+    r"(?:\.(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?))*\.?"
+)
+
+
+def _split_url_candidate(candidate):
+    """Return a balanced URL and its trailing prose delimiters, or fail closed."""
+    end = len(candidate)
+    while end and candidate[end - 1] in URL_TRAILING_PUNCTUATION:
+        end -= 1
+
+    core = candidate[:end]
+    stack = []
+    pairs = {")": "(", "]": "["}
+    for index, character in enumerate(core):
+        if character in "([":
+            stack.append(character)
+        elif character in pairs:
+            if not stack or stack[-1] != pairs[character]:
+                # Markdown and prose commonly wrap a URL in one or more closing
+                # delimiters.  They are safe to trim only when they form the
+                # entire remainder of the candidate.
+                if all(remainder in ")]" for remainder in core[index:]):
+                    end = index
+                    core = candidate[:end]
+                    break
+                return None
+            stack.pop()
+    if stack:
+        return None
+    return core, candidate[end:]
+
+
+def _has_valid_http_authority(parsed):
+    """Validate the host syntax that urlsplit intentionally leaves permissive."""
+    authority = parsed.netloc.rsplit("@", 1)[-1]
+    if authority.startswith("["):
+        match = re.fullmatch(r"\[([^\]]+)\](?::[0-9]+)?", authority)
+        if not match:
+            return False
+        try:
+            ipaddress.IPv6Address(match.group(1))
+        except ipaddress.AddressValueError:
+            return False
+        return True
+
+    if any(delimiter in authority for delimiter in "[]()") or authority.endswith(":"):
+        return False
+    try:
+        ascii_hostname = parsed.hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    return HOSTNAME.fullmatch(ascii_hostname) is not None
 
 
 def contains_machine_specific_path(content):
     """Ignore HTTP(S) network paths while scanning URL parameters for local paths."""
     def replace_url(match):
-        url = match.group()
+        candidate = match.group()
+        split_candidate = _split_url_candidate(candidate)
+        if split_candidate is None:
+            return candidate
+        url, suffix = split_candidate
         try:
             parsed = urlsplit(url)
+            hostname = parsed.hostname
+            parsed.port  # Access validates a malformed or out-of-range port.
         except ValueError:
-            return url  # Do not hide text we cannot confidently interpret as a URL.
-        if not parsed.netloc:
-            return url
+            return candidate  # Do not hide text we cannot confidently interpret as a URL.
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not hostname:
+            return candidate
+        if not _has_valid_http_authority(parsed):
+            return candidate
 
         # A URL path names a network resource, whereas query and fragment values
         # commonly carry local filenames.  Scan both their literal and decoded
@@ -54,7 +118,7 @@ def contains_machine_specific_path(content):
             parsed.fragment,
             unquote(parsed.fragment),
         ))
-        return parameters
+        return parameters + suffix
 
     without_urls = URL.sub(replace_url, content)
     return any(pattern.search(without_urls) for pattern in MACHINE_SPECIFIC_PATHS)

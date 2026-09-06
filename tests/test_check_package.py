@@ -141,6 +141,12 @@ class CheckPackageTests(unittest.TestCase):
             "https://example.com/opt/tool",
             "https://example.com/root/guide",
             "https://example.com/Users/example/project",
+            "https://[2001:db8::1]/opt/tool",
+            "https://[2001:db8::1]:8443/Users/example/project",
+            "https://example.com/releases/(stable)/root/guide",
+            "https://example.com/releases/(stable)/opt/tool",
+            "https://example.com/releases/(stable)/Users/example/project",
+            "[network path](https://example.com/releases/(stable)/Users/example/project)",
         )
         readme = self.root / "README.md"
         original = readme.read_text(encoding="utf-8")
@@ -157,6 +163,10 @@ class CheckPackageTests(unittest.TestCase):
             "https://example.test/docs#%" + "2Fopt%2Fvendor%2Fbin%2Ftool",
             "https://example.test/docs?source=/" + "home/alice/private.txt",
             r"https://example.test/upload?source=C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
+            "https://[2001:db8::1]/(stable)/opt/tool?source=/" + "Users/alice/private.txt",
+            "https://[2001:db8::1]/(stable)/root/guide?source=%" + "2Fopt%2Fvendor%2Ftool",
+            r"https://example.test/(stable)/Users/guide#source=C:" + r"\Users\alice\private.txt",
+            r"https://example.test/(stable)/root/guide#source=C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
         )
         readme = self.root / "README.md"
         original = readme.read_text(encoding="utf-8")
@@ -164,6 +174,21 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 readme.write_text(original + "\n" + example + "\n", encoding="utf-8")
                 self.assertIn("Machine-specific path: README.md", self.errors())
+
+    def test_malformed_or_ambiguous_http_urls_fail_closed(self):
+        examples = (
+            "https://[2001:db8::1/" + "opt/tool",
+            "https://[not-an-ipv6]/" + "root/private",
+            "https://example.test:invalid/" + "Users/alice/private.txt",
+            "https://example.test/releases/(stable/" + "opt/tool",
+            "https://example.test/releases/)stable(" + "/" + "Users/alice/private.txt",
+            "https://[2001:db8::1]junk/" + "opt/tool",
+            "https://foo[bar]/" + "root/private",
+            "https://example.test)foo(/" + "Users/alice/private.txt",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
 
     def test_documented_generic_tmp_path_is_allowed(self):
         readme = self.root / "README.md"
