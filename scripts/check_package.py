@@ -43,8 +43,29 @@ USERINFO = re.compile(r"(?:[A-Za-z0-9._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})+")
 INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
-def _split_url_candidate(candidate, leading_delimiter=None):
+def _url_wrapper_openers(content, start):
+    """Return adjacent outer openers with a single scan bounded by ``start``."""
+    openers = []
+    index = start
+    while index:
+        character = content[index - 1]
+        if character.isspace():
+            index -= 1
+            continue
+        if character in "([":
+            openers.append(character)
+            index -= 1
+            continue
+        break
+    return tuple(openers)
+
+
+def _split_url_candidate(candidate, leading_delimiters=()):
     """Separate sentence/Markdown closers without imposing URI path balance."""
+    if isinstance(leading_delimiters, str):
+        wrapper_openers = frozenset((leading_delimiters,))
+    else:
+        wrapper_openers = frozenset(leading_delimiters)
     opener_counts = {"(": 0, "[": 0}
     closer_counts = {")": 0, "]": 0}
     matching_opener = {")": "(", "]": "["}
@@ -62,7 +83,7 @@ def _split_url_candidate(candidate, leading_delimiter=None):
             opener = matching_opener[character]
             if opener_counts[opener] > closer_counts[character]:
                 closer_counts[character] += 1
-            elif leading_delimiter == opener:
+            elif opener in wrapper_openers:
                 end = index
                 break
             else:
@@ -152,8 +173,8 @@ def contains_machine_specific_path(content):
 
     def replace_url(match):
         candidate = match.group()
-        leading_delimiter = match.string[match.start() - 1] if match.start() else None
-        split_candidate = _split_url_candidate(candidate, leading_delimiter)
+        wrapper_openers = _url_wrapper_openers(match.string, match.start())
+        split_candidate = _split_url_candidate(candidate, wrapper_openers)
         if split_candidate is None:
             return scan_payload(candidate)
         url, suffix = split_candidate

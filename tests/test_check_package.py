@@ -229,6 +229,11 @@ class CheckPackageTests(unittest.TestCase):
             "https://example.test/o'reilly/opt/tool",
             "https://example.test/releases/[stable]/Users/alice/guide",
             "https://example.test/Users/alice,https://example.test/root/guide",
+            "See   https://example.test/root/network-guide",
+            "See ( https://example.test/releases/foo(/Users/alice/guide)",
+            "See ( https://example.test/(stable)/root/network-guide)",
+            "See [ https://[2001:db8::1]/Users/alice/guide]",
+            "Nested ( [ https://[2001:db8::1]/(stable)/opt/tool])",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -259,6 +264,10 @@ class CheckPackageTests(unittest.TestCase):
             "[docs](https://example.test/guide),/" + "root/private",
             "See (https://example.test/guide)/" + "Users/alice/private "
             "https://example.test/root/network-guide",
+            "See ( https://example.test/guide)/" + "root/private",
+            "See [ https://example.test/guide]/" + "Users/alice/private",
+            "[docs](  https://example.test/(stable))/" + "opt/vendor/tool",
+            "Nested ( [ https://[2001:db8::1]/guide])/" + "root/private",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -346,6 +355,30 @@ class CheckPackageTests(unittest.TestCase):
         small_work = trimming_work(512)
         large_work = trimming_work(1024)
         self.assertLessEqual(large_work, small_work * 2 + 32)
+
+    def test_url_wrapper_context_scan_has_linear_work(self):
+        class CountedString(str):
+            def __new__(cls, value, counts=None):
+                instance = super().__new__(cls, value)
+                instance.counts = counts if counts is not None else {"index": 0}
+                return instance
+
+            def __getitem__(self, key):
+                self.counts["index"] += 1
+                value = super().__getitem__(key)
+                if isinstance(key, slice):
+                    return type(self)(value, self.counts)
+                return value
+
+        def context_work(spaces):
+            content = CountedString("Nested ( [" + " " * spaces + "https://example.test/guide")
+            start = content.index("https://")
+            self.assertEqual(checker._url_wrapper_openers(content, start), ("[", "("))
+            return content.counts["index"]
+
+        small_work = context_work(512)
+        large_work = context_work(1024)
+        self.assertLessEqual(large_work, small_work * 2 + 8)
 
     def test_documented_generic_tmp_path_is_allowed(self):
         readme = self.root / "README.md"
