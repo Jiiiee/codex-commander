@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT / "scripts"))
@@ -146,7 +147,12 @@ class CheckPackageTests(unittest.TestCase):
             "https://example.com/releases/(stable)/root/guide",
             "https://example.com/releases/(stable)/opt/tool",
             "https://example.com/releases/(stable)/Users/example/project",
+            "https://example.com/releases/foo(/Users/example/project",
+            "https://user:pass@example.com:443/Users/example/project",
+            "https://user%2Dname@[2001:db8::1]:8443/root/guide",
             "[network path](https://example.com/releases/(stable)/Users/example/project)",
+            "[network path](https://example.com/releases/foo(/Users/example/project)",
+            "See (https://example.com/Users/example/project).",
         )
         readme = self.root / "README.md"
         original = readme.read_text(encoding="utf-8")
@@ -180,11 +186,24 @@ class CheckPackageTests(unittest.TestCase):
             "https://[2001:db8::1/" + "opt/tool",
             "https://[not-an-ipv6]/" + "root/private",
             "https://example.test:invalid/" + "Users/alice/private.txt",
-            "https://example.test/releases/(stable/" + "opt/tool",
-            "https://example.test/releases/)stable(" + "/" + "Users/alice/private.txt",
             "https://[2001:db8::1]junk/" + "opt/tool",
             "https://foo[bar]/" + "root/private",
             "https://example.test)foo(/" + "Users/alice/private.txt",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_ambiguous_http_userinfo_cannot_exempt_machine_paths(self):
+        examples = (
+            "https://u@x@evil.test/" + "Users/alice/private",
+            "https://u@x@evil.test/%" + "2FUsers%2Falice%2Fprivate",
+            "https://x\\@evil.test/" + "root/private",
+            "https://x\\@evil.test/%" + "2Froot%2Fprivate",
+            "https://%ZZ@example.test/" + "opt/vendor/tool",
+            "https://%ZZ@example.test/%" + "2Fopt%2Fvendor%2Ftool",
+            "https://@example.test/" + "Users/alice/private",
+            "https://@example.test/%" + "2FUsers%2Falice%2Fprivate",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -195,7 +214,6 @@ class CheckPackageTests(unittest.TestCase):
             "https://[not-an-ipv6]/%" + "2FUsers%2Falice%2Fprivate.txt",
             "https://example.test:invalid/%" + "2Froot%2Fprivate",
             r"https://foo[bar]/C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
-            "https://example.test/releases/(stable/%" + "2Fopt%2Fvendor%2Ftool",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -210,6 +228,60 @@ class CheckPackageTests(unittest.TestCase):
         for example in examples:
             with self.subTest(example=example):
                 self.assertFalse(checker.contains_machine_specific_path(example))
+
+    def test_nested_percent_encoding_cannot_hide_machine_paths_in_url_parameters(self):
+        examples = (
+            "https://example.test/upload?source=%" + "252FUsers%252Falice%252Fprivate.txt",
+            "https://example.test/docs#source=%" + "252Froot%252Fprivate",
+            r"https://example.test/docs#source=C%" + r"253A%255CUsers%255Calice%255Cprivate.txt",
+            "https://[not-an-ipv6]/%" + "252Fopt%252Fvendor%252Ftool",
+            r"https://example.test:invalid/C%" + r"253A%255CUsers%255Calice%255Cprivate.txt",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_encoding_beyond_decode_limit_fails_closed(self):
+        examples = (
+            "https://example.test/upload?source=%" + "2525252FUsers%2525252Falice",
+            r"https://example.test/docs#source=C%" + r"2525253A%2525255CUsers%2525255Calice",
+            "https://[not-an-ipv6]/%" + "2525252Froot%2525252Fprivate",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_percent_decoding_has_stability_and_depth_bounds(self):
+        self.assertEqual(checker._bounded_percent_decodings("ordinary=value"), ("ordinary=value",))
+        self.assertEqual(
+            checker._bounded_percent_decodings("%252FUsers%252Falice"),
+            ("%252FUsers%252Falice", "%2FUsers%2Falice", "/" + "Users/alice"),
+        )
+        deeply_encoded = "%252525252FUsers%252525252Falice"
+        with mock.patch.object(checker, "unquote", wraps=checker.unquote) as decoder:
+            layers = checker._bounded_percent_decodings(deeply_encoded)
+            self.assertEqual(decoder.call_count, checker.MAX_PERCENT_DECODE_LAYERS)
+            self.assertLessEqual(len(layers), checker.MAX_PERCENT_DECODE_LAYERS + 1)
+            self.assertLessEqual(
+                sum(len(layer) for layer in layers),
+                len(deeply_encoded) * (checker.MAX_PERCENT_DECODE_LAYERS + 1),
+            )
+            self.assertTrue(checker._percent_decoding_limit_exhausted(layers))
+            self.assertEqual(decoder.call_count, checker.MAX_PERCENT_DECODE_LAYERS + 1)
+
+    def test_url_candidate_trimming_does_not_require_balanced_path_parentheses(self):
+        self.assertEqual(
+            checker._split_url_candidate("https://example.test/releases/foo(/Users/guide"),
+            ("https://example.test/releases/foo(/Users/guide", ""),
+        )
+        self.assertEqual(
+            checker._split_url_candidate("https://example.test/Users/guide)."),
+            ("https://example.test/Users/guide", ")."),
+        )
+        self.assertEqual(
+            checker._split_url_candidate("https://example.test/(stable)/Users/guide)."),
+            ("https://example.test/(stable)/Users/guide", ")."),
+        )
 
     def test_documented_generic_tmp_path_is_allowed(self):
         readme = self.root / "README.md"

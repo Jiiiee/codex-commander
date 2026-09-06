@@ -34,45 +34,69 @@ MACHINE_SPECIFIC_PATHS = (
 )
 URL = re.compile(r"https?://[^\s`'\"<>]+", re.I)
 URL_TRAILING_PUNCTUATION = ".,;:!?"
+MAX_PERCENT_DECODE_LAYERS = 3
 HOSTNAME = re.compile(
     r"(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)"
     r"(?:\.(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?))*\.?"
 )
+USERINFO = re.compile(r"(?:[A-Za-z0-9._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})+")
+INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
 def _split_url_candidate(candidate):
-    """Return a balanced URL and its trailing prose delimiters, or fail closed."""
+    """Separate sentence/Markdown closers without imposing URI path balance."""
     end = len(candidate)
     while end and candidate[end - 1] in URL_TRAILING_PUNCTUATION:
         end -= 1
 
-    core = candidate[:end]
-    stack = []
-    pairs = {")": "(", "]": "["}
-    for index, character in enumerate(core):
-        if character in "([":
-            stack.append(character)
-        elif character in pairs:
-            if not stack or stack[-1] != pairs[character]:
-                # Markdown and prose commonly wrap a URL in one or more closing
-                # delimiters.  They are safe to trim only when they form the
-                # entire remainder of the candidate.
-                if all(remainder in ")]" for remainder in core[index:]):
-                    end = index
-                    core = candidate[:end]
-                    break
-                return None
-            stack.pop()
-    if stack:
-        return None
-    return core, candidate[end:]
+    # Parentheses are legal URI path characters, including an unmatched opening
+    # parenthesis.  Trim only excess closing delimiters at the candidate's end;
+    # this preserves balanced URL path components while removing Markdown and
+    # sentence wrappers such as ``[label](https://example.test/path)``.
+    while end and candidate[end - 1] in ")]":
+        closer = candidate[end - 1]
+        opener = "(" if closer == ")" else "["
+        prefix = candidate[:end]
+        if prefix.count(closer) <= prefix.count(opener):
+            break
+        end -= 1
+    return candidate[:end], candidate[end:]
+
+
+def _bounded_percent_decodings(value):
+    """Return distinct decode layers, stopping at stability or a fixed limit."""
+    layers = [value]
+    for _ in range(MAX_PERCENT_DECODE_LAYERS):
+        decoded = unquote(layers[-1])
+        if decoded == layers[-1]:
+            break
+        layers.append(decoded)
+    return tuple(layers)
+
+
+def _percent_decoding_limit_exhausted(layers):
+    """Report when another decoding pass would change a max-depth result."""
+    return (
+        len(layers) == MAX_PERCENT_DECODE_LAYERS + 1
+        and unquote(layers[-1]) != layers[-1]
+    )
 
 
 def _has_valid_http_authority(parsed):
-    """Validate the host syntax that urlsplit intentionally leaves permissive."""
-    authority = parsed.netloc.rsplit("@", 1)[-1]
-    if authority.startswith("["):
-        match = re.fullmatch(r"\[([^\]]+)\](?::[0-9]+)?", authority)
+    """Validate full userinfo, host, and port syntax left permissive by urlsplit."""
+    netloc = parsed.netloc
+    if "\\" in netloc or netloc.count("@") > 1 or INVALID_PERCENT_ESCAPE.search(netloc):
+        return False
+
+    if "@" in netloc:
+        userinfo, hostport = netloc.split("@", 1)
+        if not userinfo or not USERINFO.fullmatch(userinfo):
+            return False
+    else:
+        hostport = netloc
+
+    if hostport.startswith("["):
+        match = re.fullmatch(r"\[([^\]]+)\](?::[0-9]+)?", hostport)
         if not match:
             return False
         try:
@@ -81,7 +105,11 @@ def _has_valid_http_authority(parsed):
             return False
         return True
 
-    if any(delimiter in authority for delimiter in "[]()") or authority.endswith(":"):
+    if (
+        any(delimiter in hostport for delimiter in "[]()")
+        or hostport.endswith(":")
+        or hostport.count(":") > 1
+    ):
         return False
     try:
         ascii_hostname = parsed.hostname.encode("idna").decode("ascii")
@@ -90,43 +118,44 @@ def _has_valid_http_authority(parsed):
     return HOSTNAME.fullmatch(ascii_hostname) is not None
 
 
-def _ambiguous_url_scan_payload(candidate):
-    """Expose raw and once-decoded ambiguous URL text to local-path checks."""
-    return "\n".join((candidate, unquote(candidate)))
-
-
 def contains_machine_specific_path(content):
     """Ignore HTTP(S) network paths while scanning URL parameters for local paths."""
+    decode_limit_exhausted = False
+
+    def scan_payload(value):
+        nonlocal decode_limit_exhausted
+        layers = _bounded_percent_decodings(value)
+        if _percent_decoding_limit_exhausted(layers):
+            decode_limit_exhausted = True
+        return "\n".join(layers)
+
     def replace_url(match):
         candidate = match.group()
         split_candidate = _split_url_candidate(candidate)
         if split_candidate is None:
-            return _ambiguous_url_scan_payload(candidate)
+            return scan_payload(candidate)
         url, suffix = split_candidate
         try:
             parsed = urlsplit(url)
             hostname = parsed.hostname
             parsed.port  # Access validates a malformed or out-of-range port.
         except ValueError:
-            return _ambiguous_url_scan_payload(candidate)
+            return scan_payload(candidate)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not hostname:
-            return _ambiguous_url_scan_payload(candidate)
+            return scan_payload(candidate)
         if not _has_valid_http_authority(parsed):
-            return _ambiguous_url_scan_payload(candidate)
+            return scan_payload(candidate)
 
         # A URL path names a network resource, whereas query and fragment values
         # commonly carry local filenames.  Scan both their literal and decoded
         # forms so percent-encoding cannot bypass the package check.
-        parameters = "\n".join((
-            parsed.query,
-            unquote(parsed.query),
-            parsed.fragment,
-            unquote(parsed.fragment),
-        ))
+        parameters = "\n".join((scan_payload(parsed.query), scan_payload(parsed.fragment)))
         return parameters + suffix
 
     without_urls = URL.sub(replace_url, content)
-    return any(pattern.search(without_urls) for pattern in MACHINE_SPECIFIC_PATHS)
+    return decode_limit_exhausted or any(
+        pattern.search(without_urls) for pattern in MACHINE_SPECIFIC_PATHS
+    )
 
 
 def check_version(root, errors):
