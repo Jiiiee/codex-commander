@@ -528,6 +528,26 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_wrapper_closer_structural_separators_trigger_safe_scan(self):
+        examples = (
+            "~~https://example.test/guide~~(path=/" + "Users/alice/private)",
+            "~~https://example.test/guide~~foo&amp;path=/" + "opt/vendor/tool",
+            "~~https://example.test/guide~~foo'path=/" + "home/alice/private",
+            "~~https://example.test/guide~~foo&path=/" + "Users/alice/private",
+            "~~https://example.test/guide~~foo*path=/" + "Users/alice/private",
+            "~~https://example.test/guide~~foo~path=/" + "root/private",
+            "~~https://example.test/guide~~foo`path=/" + "opt/vendor/tool",
+            "~~https://example.test/guide~~foo{path=/" + "home/alice/private}",
+            "~~https://example.test/guide~~foo[path=/" + "root/private]",
+            "~~https://example.test/guide~~foo【path=/" + "home/alice/private】",
+            "~~https://example.test/guide~~foo%28path%3D%" + "2Froot%2Fprivate%29",
+            "~~https://example.test/guide~~foo%27path%3D%" + "2FUsers%2Falice%2Fprivate",
+            "~~https://example.test/guide~~foo%26amp%3Bpath%253D%" + "252Fopt%252Fvendor",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
     def test_wrapper_residual_tokens_and_html_entities_are_generic_and_bounded(self):
         examples = (
             "~~https://example.test/guide~~" + "path%3D%2FUsers%2Falice%2Fprivate",

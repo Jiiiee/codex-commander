@@ -89,6 +89,12 @@ WRAPPER_CLOSERS = {
     "《": "》",
     "<": ">",
 }
+# Separate document punctuation from URI component stops using the tokenizer's
+# structural grammar.  The bounded probe may cross one such separator to decide
+# whether a putative closer is followed by a residual assignment.
+AMBIGUOUS_RESIDUAL_SEPARATOR_CHARACTERS = frozenset(
+    RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS.difference("=%/\\?#")
+)
 SYMMETRIC_WRAPPERS = frozenset(
     ("'", '"', "‘", "“", "*", "**", "_", "__", "`", "~~")
 )
@@ -192,10 +198,19 @@ def _decoded_boundary_kind(value, allow_token):
         return False, False
 
     token_length = 0
+    separator_consumed = False
     while index < len(value):
         character = value[index]
         if character == "=":
             return token_length > 0, False
+        separator_end = _ambiguous_residual_separator_end(value, index)
+        if separator_end is not None:
+            if not allow_token or separator_consumed:
+                return False, False
+            separator_consumed = True
+            token_length = 0
+            index = separator_end
+            continue
         if (
             character.isspace()
             or character in RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS
@@ -206,6 +221,27 @@ def _decoded_boundary_kind(value, allow_token):
         index += 1
         token_length += 1
     return False, token_length > 0
+
+
+def _ambiguous_residual_separator_end(value, index):
+    """Return the end of one raw/HTML document separator, with fixed work."""
+    character = value[index]
+    if character not in AMBIGUOUS_RESIDUAL_SEPARATOR_CHARACTERS:
+        return None
+    if character != "&":
+        return index + 1
+
+    # Treat a bounded named or numeric HTML entity as one separator token.  A
+    # bare ampersand remains a one-character separator.
+    entity_end = index + 1
+    while entity_end < len(value) and entity_end - index <= MAX_RESIDUAL_TOKEN_CHARACTERS:
+        character = value[entity_end]
+        if character == ";":
+            return entity_end + 1
+        if not (character.isalnum() or character == "#"):
+            break
+        entity_end += 1
+    return index + 1
 
 
 def _bounded_boundary_probe(candidate, start, allow_token):
@@ -228,20 +264,29 @@ def _bounded_boundary_probe(candidate, start, allow_token):
 
 
 def _raw_residual_boundary(candidate, start):
-    """直接扫描短 token；遇到 percent escape 时交给有界解码。"""
+    """线性扫描 raw 短 token 和单个结构分隔符；percent 交给 probe。"""
     if start >= len(candidate):
         return False, False, False
-    if candidate[start] in "&%":
+    if candidate[start] == "%":
         return False, True, False
 
     index = start
     token_length = 0
+    separator_consumed = False
     while index < len(candidate):
         character = candidate[index]
         if character == "=":
             return token_length > 0, False, False
         if character == "%":
             return False, True, False
+        separator_end = _ambiguous_residual_separator_end(candidate, index)
+        if separator_end is not None:
+            if separator_consumed:
+                return False, False, False
+            separator_consumed = True
+            token_length = 0
+            index = separator_end
+            continue
         if (
             character.isspace()
             or character in RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS
@@ -262,12 +307,12 @@ def _is_wrapper_closer_boundary(candidate, end, outer_openers):
         return True
     if any(candidate.startswith(WRAPPER_CLOSERS[opener], end) for opener in outer_openers):
         return True
-    residual, requires_decoding, exhausted = _raw_residual_boundary(candidate, end)
+    residual, requires_probe, exhausted = _raw_residual_boundary(candidate, end)
     if exhausted:
         return None
     if residual:
         return True
-    if requires_decoding:
+    if requires_probe:
         residual, exhausted = _bounded_boundary_probe(candidate, end, allow_token=True)
         if exhausted:
             return None
