@@ -252,6 +252,40 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_embedded_or_ambiguous_http_scheme_prefixes_fail_closed(self):
+        examples = (
+            "nothhttps://example.test/" + "Users/alice/private",
+            "xhttps://example.test/" + "root/private",
+            "abchttp://example.test/" + "opt/tool",
+            "httpshttps://example.test/" + "Users/alice/private",
+            "mailto:https://example.test/" + "root/private",
+            "foo:/https://example.test/" + "opt/tool",
+            "foo://https://example.test/" + "Users/alice/private",
+            "token_https://example.test/" + "root/private",
+            "token-https://example.test/" + "opt/tool",
+            "1https://example.test/" + "Users/alice/private",
+            "user@https://example.test/" + "root/private",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_http_scheme_start_boundaries_keep_network_paths_exempt(self):
+        examples = (
+            "https://example.test/Users/alice/guide",
+            "\nhttps://example.test/" + "root/guide",
+            "See https://example.test/opt/tool",
+            ",https://example.test/Users/alice/guide",
+            ";https://example.test/root/guide",
+            "url=https://example.test/opt/tool",
+            "[docs](https://example.test/Users/alice/guide)",
+            "( https://example.test/(stable)/root/guide)",
+            '"https://example.test/opt/tool"',
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
     def test_markdown_or_sentence_closers_cannot_absorb_machine_paths(self):
         examples = (
             "[docs](https://example.test/guide)/" + "Users/alice/private",

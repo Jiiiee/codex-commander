@@ -41,6 +41,18 @@ HOSTNAME = re.compile(
 )
 USERINFO = re.compile(r"(?:[A-Za-z0-9._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})+")
 INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+AMBIGUOUS_URL_PREFIX_CHARACTERS = frozenset("_+-.%:/\\@")
+
+
+def _has_http_scheme_start_boundary(content, start):
+    """Reject a scheme match embedded in an identifier or URI-like prefix."""
+    if start == 0:
+        return True
+    previous = content[start - 1]
+    return not (
+        previous.isalnum()
+        or previous in AMBIGUOUS_URL_PREFIX_CHARACTERS
+    )
 
 
 def _url_wrapper_openers(content, start):
@@ -173,6 +185,8 @@ def contains_machine_specific_path(content):
 
     def replace_url(match):
         candidate = match.group()
+        if not _has_http_scheme_start_boundary(match.string, match.start()):
+            return scan_payload(candidate)
         wrapper_openers = _url_wrapper_openers(match.string, match.start())
         split_candidate = _split_url_candidate(candidate, wrapper_openers)
         if split_candidate is None:
