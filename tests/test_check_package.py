@@ -1631,6 +1631,35 @@ class DetectionContractV05Tests(unittest.TestCase):
             self.assertTrue(any(report["file"] == "VERSION" for report in reports), reports)
             self.assertFalse(any(report["file"] == "not-in-manifest.dat" for report in reports), reports)
 
+    def test_dense_raw_url_prescan_has_counted_linear_work(self):
+        prefix = "[" + "p" * 8_190 + " "
+        url_unit = "https://example.test/network/guide "
+        plain_unit = "safe-network-resource-placeholder "
+        small_n = 131_072
+        large_n = 262_144
+
+        def generated(length, unit):
+            return (prefix + unit * (length // len(unit) + 1))[:length]
+
+        url_results = []
+        for length in (small_n, large_n):
+            urls = checker.scan_text(generated(length, url_unit), "README.md")
+            plain = checker.scan_text(generated(length, plain_unit), "README.md")
+            self.assertEqual(urls["reports"], [])
+            self.assertEqual(plain["reports"], [])
+            self.assertGreaterEqual(
+                urls["metrics"]["work"] - plain["metrics"]["work"],
+                length // 2,
+                "raw URL candidates must be included in tokenizer/classifier work",
+            )
+            self.assertLessEqual(urls["metrics"]["work"], 64 * length + 524_288)
+            url_results.append(urls)
+
+        self.assertLessEqual(
+            url_results[1]["metrics"]["work"] / url_results[0]["metrics"]["work"],
+            2.2,
+        )
+
     def test_fixed_windows_state_bounds_and_linear_work(self):
         unit = "%26amp%3Bcopy%3B-safe "
         small_n = 131_072

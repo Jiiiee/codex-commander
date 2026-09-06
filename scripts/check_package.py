@@ -1011,38 +1011,98 @@ def _raw_url_regions(text, global_start):
     forced = []
     boundary = []
     too_long = []
+    url_starts = []
+    whitespace = []
+    inline_closers = []
+    autolink_closers = []
+    last_label_open = -1
+    last_label_close = -1
+    previous_label_close = -1
+
+    # Tokenize the raw window exactly once from left to right.  Boundary
+    # positions let candidate extraction avoid a backward label search and
+    # repeated forward searches over overlapping suffixes for every URL start.
+    for index, character in enumerate(text):
+        match = HTTP_START.match(text, index)
+        if match is not None:
+            inline = (
+                index >= 2
+                and text[index - 2:index] == "]("
+                and last_label_open != -1
+                and previous_label_close <= last_label_open
+            )
+            url_starts.append(
+                (
+                    index,
+                    match.end(),
+                    inline,
+                    index > 0 and text[index - 1] == "<",
+                    index == 0 or _ascii_space(text[index - 1]),
+                )
+            )
+        if _ascii_space(character):
+            whitespace.append(index)
+        if character == ")":
+            inline_closers.append(index)
+        elif character == ">":
+            autolink_closers.append(index)
+        if character == "[":
+            last_label_open = index
+        elif character == "]":
+            previous_label_close = last_label_close
+            last_label_close = index
+
+    work = len(text)
     occupied_until = -1
-    for match in HTTP_START.finditer(text):
-        start = match.start()
+    whitespace_index = 0
+    inline_closer_index = 0
+    autolink_closer_index = 0
+    for start, scheme_end, inline, autolink, bare in url_starts:
         if start < occupied_until:
             continue
         kind = None
         end = None
-        label_open = text.rfind("[", 0, max(0, start - 2))
-        if (
-            start >= 2
-            and text[start - 2:start] == "]("
-            and label_open != -1
-            and "]" not in text[label_open + 1:start - 2]
-        ):
-            close = text.find(")", match.end())
-            if close != -1:
-                kind, end = "inline", close
-        elif start and text[start - 1] == "<":
-            close = text.find(">", match.end())
-            if close != -1:
-                kind, end = "autolink", close
-        elif start == 0 or _ascii_space(text[start - 1]):
-            cursor = start
-            while cursor < len(text) and not _ascii_space(text[cursor]):
-                cursor += 1
-            kind, end = "bare", cursor
+        if inline:
+            while (
+                inline_closer_index < len(inline_closers)
+                and inline_closers[inline_closer_index] < scheme_end
+            ):
+                inline_closer_index += 1
+            if inline_closer_index < len(inline_closers):
+                kind, end = "inline", inline_closers[inline_closer_index]
+        elif autolink:
+            while (
+                autolink_closer_index < len(autolink_closers)
+                and autolink_closers[autolink_closer_index] < scheme_end
+            ):
+                autolink_closer_index += 1
+            if autolink_closer_index < len(autolink_closers):
+                kind, end = "autolink", autolink_closers[autolink_closer_index]
+        elif bare:
+            while (
+                whitespace_index < len(whitespace)
+                and whitespace[whitespace_index] < scheme_end
+            ):
+                whitespace_index += 1
+            end = (
+                whitespace[whitespace_index]
+                if whitespace_index < len(whitespace)
+                else len(text)
+            )
+            kind = "bare"
         if end is None:
-            cursor = start
-            while cursor < len(text) and not _ascii_space(text[cursor]):
-                cursor += 1
-            end = cursor
+            while (
+                whitespace_index < len(whitespace)
+                and whitespace[whitespace_index] < scheme_end
+            ):
+                whitespace_index += 1
+            end = (
+                whitespace[whitespace_index]
+                if whitespace_index < len(whitespace)
+                else len(text)
+            )
         candidate = text[start:end]
+        work += len(candidate)
         explicit = kind is not None
         if kind == "bare" and candidate and candidate[-1] in BAD_BARE_URL_END:
             explicit = False
@@ -1061,7 +1121,7 @@ def _raw_url_regions(text, global_start):
             (source_start + component_start, source_start + component_end)
             for component_start, component_end in parsed["non_path"]
         )
-    return exempt, forced, boundary, too_long
+    return exempt, forced, boundary, too_long, work
 
 
 def _in_interval(start, end, intervals):
@@ -1180,7 +1240,8 @@ def scan_text(text, file_name="<memory>"):
     for window_start in range(0, len(text), DETECTION_OVERLAP):
         raw = text[window_start:min(window_start + DETECTION_WINDOW, len(text))]
         metrics["max_window"] = max(metrics["max_window"], len(raw))
-        exempt, forced, boundary, long_urls = _raw_url_regions(raw, window_start)
+        exempt, forced, boundary, long_urls, raw_url_work = _raw_url_regions(raw, window_start)
+        metrics["work"] += raw_url_work
         for source_start, source_end in long_urls:
             metrics["max_candidate_span"] = max(metrics["max_candidate_span"], source_end - source_start)
             reports.append(_make_report(file_name, line_for(source_start), "candidate_too_long", source_start, source_end))

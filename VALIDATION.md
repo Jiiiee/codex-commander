@@ -177,6 +177,20 @@ part of the 135-test pre-COD-38 snapshot reported above, together with explicit-
 token controls. Its maximum/overflow and linear-work assertions are also part of
 that reproducible candidate suite.
 
+## COD-45 raw-URL prescan linearization (attempt 1)
+
+The v0.5 raw-URL region prescan was repaired and checked locally on macOS on
+2026-09-07. The frozen contract, fixture, decoding and scan scope were unchanged;
+no hosted CI, push, pull request, tag, release, or external review was used.
+
+| Check | Observed result |
+| --- | --- |
+| Independent adversarial regression | A deterministic 131,072/262,144-character fixture combines an 8,192-character prefix with dense HTTP(S) starts. The pre-fix URL and no-URL controls both reported 761,856/1,548,288 work (zero classifier delta), exposing the accounting gap. |
+| Counted linear work after repair | URL work was 1,254,270 and 2,557,205 characters; the ratio was 2.0388. The corresponding absolute limits were 8,912,896 and 17,301,504. No-URL control work was 1,015,808 and 2,064,384, so raw URL classifier deltas were 238,462 and 492,821. |
+| Detection compatibility | All 60 frozen fixture cases passed, and 5,000 deterministic adversarial inputs produced identical structured reports before and after the prescan change. |
+| Full local suite | All 156 tests passed, comprising the previous 155 behaviors plus the new adversarial regression. |
+| Package and supporting local gates | The package check, checksum verification, runner list, runner dry-run to a temporary output path, and diff whitespace check passed. |
+
 ## Version 0.1.3: bilingual publication preparation
 
 Added a complete Simplified Chinese README with reciprocal language links.
