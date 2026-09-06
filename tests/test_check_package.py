@@ -507,10 +507,78 @@ class CheckPackageTests(unittest.TestCase):
             "token__https://example.test/" + "Users/alice/private__",
             "word*https://example.test/" + "root/private*",
             "name_https://example.test/%" + "2Fopt%2Fvendor",
+            "token~https://example.test/" + "opt/vendor",
+            "word~~https://example.test/" + "Users/alice/private~~",
+            "token~~https://example.test/%" + "2Froot%2Fprivate~~",
+            "word~~~https://example.test/" + "root/private~~~",
         )
         for example in examples:
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_wrapper_closers_before_direct_keys_expose_machine_paths(self):
+        examples = (
+            "~~https://example.test/guide~~path=/" + "Users/alice/private",
+            "'https://example.test/guide'file=%" + "2Froot%2Fprivate",
+            "*https://example.test/guide*path=C:" + r"\Users\alice\private",
+            "_https://example.test/guide_file=C%" + r"3A%5CUsers%5Calice%5Cprivate",
+            "（https://example.test/guide）source=%" + "252Fopt%252Fvendor",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_url_boundary_residuals_use_bounded_percent_decoding(self):
+        examples = (
+            "https://example.test/guide\x1f/%" + "2FUsers%2Falice%2Fprivate",
+            "https://example.test/guide</%" + "2Froot%2Fprivate",
+            "https://example.test/guide>/%" + "252Fopt%252Fvendor",
+            "https://example.test/guide&lt;/%" + "2Fhome%2Falice%2Fprivate",
+            r"https://example.test/guide&gt;C%" + r"3A%5CUsers%5Calice%5Cprivate",
+            "https://example.test/guide&amp;lt;/%" + "252Froot%252Fprivate",
+            r"https://example.test/guide&amp;gt;C%" + r"253A%255CUsers%255Calice%255Cprivate",
+            "https://example.test/guide</%ZZ/%" + "2FUsers%2Falice/private",
+            "https://example.test/guide>/%" + "2525252Fopt%2525252Fvendor",
+        )
+        for example in examples:
+            with self.subTest(example=repr(example)):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_url_boundary_residuals_do_not_absorb_a_following_url(self):
+        examples = (
+            "<https://example.test/Users/alice/guide>"
+            "<https://example.test/root/network-guide>",
+            "https://example.test/" + "opt/network-guide\x1f"
+            "https://example.test/Users/alice/guide",
+        )
+        for example in examples:
+            with self.subTest(example=repr(example)):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
+    def test_symmetric_wrapper_closer_scan_has_linear_slice_work(self):
+        class CountedString(str):
+            def __new__(cls, value, counts=None):
+                instance = super().__new__(cls, value)
+                instance.counts = counts if counts is not None else {"slice_work": 0}
+                return instance
+
+            def __getitem__(self, key):
+                value = super().__getitem__(key)
+                if isinstance(key, slice):
+                    self.counts["slice_work"] += len(value)
+                    return type(self)(value, self.counts)
+                return value
+
+        def closer_work(segments):
+            candidate = CountedString("https://example.test/" + "segment*" * segments)
+            url, suffix = checker._split_url_candidate(candidate, ("*",))
+            self.assertEqual(url, candidate[:-1])
+            self.assertEqual(suffix, "*")
+            return candidate.counts["slice_work"]
+
+        small_work = closer_work(256)
+        large_work = closer_work(512)
+        self.assertLessEqual(large_work, small_work * 2 + 32)
 
     def test_wrapper_context_limits_fail_closed_with_bounded_work(self):
         class CountedString(str):

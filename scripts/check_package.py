@@ -46,10 +46,14 @@ URI_PATH_CHARACTERS = frozenset(
     "-._~!$&'()*+,;=:@/"
 )
 HEXADECIMAL_CHARACTERS = frozenset("0123456789ABCDEFabcdef")
-AMBIGUOUS_URL_PREFIX_CHARACTERS = frozenset("_*'+-.%:/\\@")
+AMBIGUOUS_URL_PREFIX_CHARACTERS = frozenset("_*~'+-.%:/\\@")
 MAX_WRAPPER_CONTEXT_CHARACTERS = 4096
 MAX_WRAPPER_DEPTH = 32
 CONTEXT_LIMIT = "<wrapper-context-limit>"
+HTML_WRAPPER_BOUNDARIES = ("&amp;lt;", "&amp;gt;", "&lt;", "&gt;")
+DIRECT_KEY_VALUE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*=")
+HTML_KEY_VALUE = re.compile(r"&(?:amp;)*(?:[A-Za-z_][A-Za-z0-9_.-]*)=")
+DRIVE_PREFIX = re.compile(r"[A-Za-z](?::|%[0-9A-Fa-f]{2})")
 WRAPPER_CLOSERS = {
     "(": ")",
     "[": "]",
@@ -113,8 +117,10 @@ def _url_wrapper_openers(content, start):
         if opener is None or len(openers) == MAX_WRAPPER_DEPTH:
             break
         token_start = index - len(opener)
-        if opener in SYMMETRIC_WRAPPERS and token_start and content[token_start - 1].isalnum():
-            break
+        if opener in SYMMETRIC_WRAPPERS and token_start:
+            previous = content[token_start - 1]
+            if previous.isalnum() or (opener == "~~" and previous == "~"):
+                break
         openers.append(opener)
         scanned += len(opener)
         index = token_start
@@ -129,14 +135,43 @@ def _is_wrapper_closer_boundary(candidate, end, outer_openers):
     """Distinguish document closers from legal URI sub-delimiters."""
     if end == len(candidate):
         return True
-    remainder = candidate[end:]
-    if remainder[0].isspace() or remainder[0] in URL_TRAILING_PUNCTUATION + "/\\%=":
+    if candidate[end].isspace() or candidate[end] in URL_TRAILING_PUNCTUATION + "/\\%=":
         return True
-    if any(remainder.startswith(WRAPPER_CLOSERS[opener]) for opener in outer_openers):
+    if any(candidate.startswith(WRAPPER_CLOSERS[opener], end) for opener in outer_openers):
         return True
-    if re.match(r"&(?:amp;)*(?:[A-Za-z_][A-Za-z0-9_.-]*)=", remainder):
+    if DIRECT_KEY_VALUE.match(candidate, end) or HTML_KEY_VALUE.match(candidate, end):
         return True
-    return re.match(r"[A-Za-z](?::|%[0-9A-Fa-f]{2})", remainder) is not None
+    return DRIVE_PREFIX.match(candidate, end) is not None
+
+
+def _bounded_url_boundary_tail(content, start):
+    """Capture text attached after a raw URL boundary with bounded work."""
+    if start == len(content):
+        return "", False
+    character = content[start]
+    codepoint = ord(character)
+    if character not in "<>" and not (codepoint < 0x20 or 0x7F <= codepoint <= 0x9F):
+        return "", False
+
+    index = start + 1
+    scanned = 1
+    while (
+        index < len(content)
+        and scanned < MAX_WRAPPER_CONTEXT_CHARACTERS
+        and not content[index].isspace()
+    ):
+        index += 1
+        scanned += 1
+    exhausted = scanned == MAX_WRAPPER_CONTEXT_CHARACTERS and index < len(content)
+    next_url = URL.search(content, start + 1, index)
+    if next_url:
+        next_openers = _url_wrapper_openers(content, next_url.start())
+        if CONTEXT_LIMIT not in next_openers and _has_http_scheme_start_boundary(
+            content, next_url.start(), next_openers
+        ):
+            index = next_url.start()
+            exhausted = False
+    return content[start:index], exhausted
 
 
 def _remaining_wrapper_openers(suffix, wrapper_openers):
@@ -222,6 +257,9 @@ def _split_url_candidate(candidate, leading_delimiters=()):
     end = len(candidate)
     for index in range(end):
         character = candidate[index]
+        if any(candidate.startswith(boundary, index) for boundary in HTML_WRAPPER_BOUNDARIES):
+            end = index
+            break
         if character in NON_URI_DOCUMENT_DELIMITERS:
             end = index
             break
@@ -352,29 +390,42 @@ def contains_machine_specific_path(content):
     def replace_url(match):
         nonlocal decode_limit_exhausted
         candidate = match.group()
+        boundary_tail, boundary_limit_exhausted = _bounded_url_boundary_tail(
+            match.string, match.end()
+        )
+        if boundary_limit_exhausted:
+            decode_limit_exhausted = True
+
+        def scan_candidate():
+            return scan_payload(candidate + "\n" + boundary_tail)
+
         wrapper_openers = _url_wrapper_openers(match.string, match.start())
         if CONTEXT_LIMIT in wrapper_openers:
-            return scan_payload(candidate)
+            return scan_candidate()
         if not _has_http_scheme_start_boundary(match.string, match.start(), wrapper_openers):
-            return scan_payload(candidate)
+            return scan_candidate()
         split_candidate = _split_url_candidate(candidate, wrapper_openers)
         if split_candidate is None:
-            return scan_payload(candidate)
+            return scan_candidate()
         url, suffix = split_candidate
-        if INVALID_PERCENT_ESCAPE.search(url) or INVALID_PERCENT_ESCAPE.search(suffix):
-            return scan_payload(candidate)
+        if (
+            INVALID_PERCENT_ESCAPE.search(url)
+            or INVALID_PERCENT_ESCAPE.search(suffix)
+            or INVALID_PERCENT_ESCAPE.search(boundary_tail)
+        ):
+            return scan_candidate()
         try:
             parsed = urlsplit(url)
             hostname = parsed.hostname
             parsed.port  # Access validates a malformed or out-of-range port.
         except ValueError:
-            return scan_payload(candidate)
+            return scan_candidate()
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not hostname:
-            return scan_payload(candidate)
+            return scan_candidate()
         if not _has_valid_http_authority(parsed):
-            return scan_payload(candidate)
+            return scan_candidate()
         if not _has_valid_uri_path(parsed.path):
-            return scan_payload(candidate)
+            return scan_candidate()
 
         # A URL path names a network resource, whereas query and fragment values
         # commonly carry local filenames.  Scan both their literal and decoded
@@ -393,6 +444,7 @@ def contains_machine_specific_path(content):
                 scan_payload(parsed.fragment),
                 scan_payload(suffix),
                 scan_payload(wrapper_tail),
+                scan_payload(boundary_tail),
             )
         )
 
