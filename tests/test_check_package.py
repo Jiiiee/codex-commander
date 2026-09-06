@@ -559,6 +559,21 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_interleaved_wrapper_tokens_and_separators_trigger_safe_scan(self):
+        examples = (
+            "~~https://example.test/guide~~foo'bar'path=/"
+            + "home/alice/private",
+            "~~https://example.test/guide~~foo&amp;amp;bar'path=/"
+            + "opt/vendor/tool",
+            "~~https://example.test/guide~~foo&amp;bar'path=/"
+            + "opt/vendor/tool",
+            "~~https://example.test/guide~~foo%27bar%28path%3D%"
+            + "2Froot%2Fprivate",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
     def test_wrapper_separator_sequences_are_bounded_and_encoding_complete(self):
         def encode_every_byte(value):
             return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))
@@ -566,10 +581,14 @@ class CheckPackageTests(unittest.TestCase):
         maximum_separators = "'(" * (
             checker.MAX_RESIDUAL_SEPARATOR_CHARACTERS // 2
         )
-        triple_encoded_boundary = "前" * checker.MAX_RESIDUAL_TOKEN_CHARACTERS
-        triple_encoded_boundary += "'" * checker.MAX_RESIDUAL_SEPARATOR_CHARACTERS
-        triple_encoded_boundary += "后" * checker.MAX_RESIDUAL_TOKEN_CHARACTERS
-        triple_encoded_boundary += "=/" + "Users/alice/private"
+        maximum_alternating = "a'" * (
+            checker.MAX_RESIDUAL_TOKEN_CHARACTERS - len("path")
+        )
+        maximum_alternating += "path=/" + "Users/alice/private"
+        triple_encoded_boundary = "前'" * (
+            checker.MAX_RESIDUAL_TOKEN_CHARACTERS - len("路径id")
+        )
+        triple_encoded_boundary += "路径id=/" + "Users/alice/private"
         for _ in range(checker.MAX_PERCENT_DECODE_LAYERS):
             triple_encoded_boundary = encode_every_byte(triple_encoded_boundary)
 
@@ -583,12 +602,20 @@ class CheckPackageTests(unittest.TestCase):
             + "opt/vendor/tool",
             "~~https://example.test/guide~~foo&amp;%27%28path%253D%"
             + "252Fhome%252Falice%252Fprivate",
+            "~~https://example.test/guide~~" + maximum_alternating,
+            "~~https://example.test/guide~~"
+            + "a'" * (checker.MAX_RESIDUAL_TOKEN_CHARACTERS - len("path") + 1)
+            + "path=/" + "root/private",
             "~~https://example.test/guide~~" + triple_encoded_boundary,
         )
         allowed = (
             "[network path](https://example.test/release%27%28path=/"
             + "Users/alice/guide)",
             "<https://example.test/release%26amp%3B%27path=/"
+            + "root/network-guide>",
+            "[network path](https://example.test/release%27bar%28path=/"
+            + "Users/alice/guide)",
+            "<https://example.test/release%26amp%3Bbar%27path=/"
             + "root/network-guide>",
         )
         for example in rejected:
@@ -774,6 +801,33 @@ class CheckPackageTests(unittest.TestCase):
 
         small_work = sequence_work(256)
         large_work = sequence_work(512)
+        self.assertLessEqual(large_work, small_work * 2 + 1024)
+
+    def test_alternating_wrapper_separator_scan_has_linear_slice_work(self):
+        class CountedString(str):
+            def __new__(cls, value, counts=None):
+                instance = super().__new__(cls, value)
+                instance.counts = counts if counts is not None else {"slice_work": 0}
+                return instance
+
+            def __getitem__(self, key):
+                value = super().__getitem__(key)
+                if isinstance(key, slice):
+                    self.counts["slice_work"] += len(value)
+                    return type(self)(value, self.counts)
+                return value
+
+        def alternating_work(segments):
+            candidate = CountedString(
+                "https://example.test/"
+                + "segment*'a'b'" * segments
+                + "path=public"
+            )
+            self.assertIsNotNone(checker._split_url_candidate(candidate, ("*",)))
+            return candidate.counts["slice_work"]
+
+        small_work = alternating_work(256)
+        large_work = alternating_work(512)
         self.assertLessEqual(large_work, small_work * 2 + 1024)
 
     def test_url_boundary_residuals_use_bounded_percent_decoding(self):

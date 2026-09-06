@@ -55,13 +55,13 @@ MAX_RESIDUAL_SEPARATOR_CHARACTERS = MAX_RESIDUAL_TOKEN_CHARACTERS
 MAX_HTML_ENTITY_LAYERS = 3
 MAX_UTF8_BYTES_PER_CHARACTER = 4
 PERCENT_ESCAPE_EXPANSION = 3
-# 源窗口覆盖三层 HTML 前缀、separator 前后各一个 64 字符 token、
-# 最多 64 字符的连续 separator 和赋值符；每个字符再按四字节 UTF-8
+# 源窗口覆盖三层 HTML 前缀、总计 64 字符的 bounded token、总计
+# 64 字符的 separator sequence 和赋值符；每个字符再按四字节 UTF-8
 # 与三层 ``%XX`` 的最坏膨胀计算，不能使用经验常量。
 MAX_RESIDUAL_DECODED_CHARACTERS = (
     1
     + 4 * MAX_HTML_ENTITY_LAYERS
-    + 2 * MAX_RESIDUAL_TOKEN_CHARACTERS
+    + MAX_RESIDUAL_TOKEN_CHARACTERS
     + MAX_RESIDUAL_SEPARATOR_CHARACTERS
     + 1
 )
@@ -96,8 +96,8 @@ WRAPPER_CLOSERS = {
     "<": ">",
 }
 # Separate document punctuation from URI component stops using the tokenizer's
-# structural grammar.  The bounded probe may cross one such separator to decide
-# whether a putative closer is followed by a residual assignment.
+# structural grammar.  The bounded probe may cross an alternating sequence of
+# residual tokens and such separators to find a residual assignment.
 AMBIGUOUS_RESIDUAL_SEPARATOR_CHARACTERS = frozenset(
     RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS.difference("=%/\\?#")
 )
@@ -186,11 +186,10 @@ def _decoded_html_prefix(value):
     return index, False
 
 
-def _decoded_boundary_kind(value, allow_token):
+def _decoded_boundary_kind(value, allow_token, restart_closer=None):
     """用固定上界识别已解码的 wrapper 残余结构。"""
     index = 0
     separator_characters = 0
-    separator_started = False
     if value.startswith("&"):
         index, exhausted = _decoded_html_prefix(value)
         if exhausted:
@@ -203,12 +202,18 @@ def _decoded_boundary_kind(value, allow_token):
         if not allow_token:
             return False, False
         separator_characters = index
-        separator_started = True
     elif not allow_token:
         return False, False
 
     token_length = 0
+    token_characters = 0
     while index < len(value):
+        if restart_closer and value.startswith(restart_closer, index):
+            index += len(restart_closer)
+            separator_characters = 0
+            token_length = 0
+            token_characters = 0
+            continue
         character = value[index]
         if character == "=":
             return token_length > 0, False
@@ -218,9 +223,8 @@ def _decoded_boundary_kind(value, allow_token):
         if separator_exhausted:
             return False, True
         if separator_end is not None:
-            if not allow_token or (separator_started and token_length):
+            if not allow_token:
                 return False, False
-            separator_started = True
             token_length = 0
             separator_characters += separator_end - index
             if separator_characters > MAX_RESIDUAL_SEPARATOR_CHARACTERS:
@@ -232,11 +236,12 @@ def _decoded_boundary_kind(value, allow_token):
             or character in RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS
         ):
             return False, False
-        if token_length == MAX_RESIDUAL_TOKEN_CHARACTERS:
+        if token_characters == MAX_RESIDUAL_TOKEN_CHARACTERS:
             return False, True
         index += 1
         token_length += 1
-    return False, token_length > 0
+        token_characters += 1
+    return False, token_characters > 0 or separator_characters > 0
 
 
 def _ambiguous_residual_separator_end(value, index):
@@ -271,7 +276,7 @@ def _ambiguous_residual_separator_end(value, index):
     return index + 1, False
 
 
-def _bounded_boundary_probe(candidate, start, allow_token):
+def _bounded_boundary_probe(candidate, start, allow_token, restart_closer=None):
     """在推导出的固定源窗口内解码；任何不完整状态均 fail-closed。"""
     source_end = min(len(candidate), start + MAX_RESIDUAL_SOURCE_CHARACTERS)
     source = candidate[start:source_end]
@@ -284,13 +289,15 @@ def _bounded_boundary_probe(candidate, start, allow_token):
     ):
         return False, True
     for layer in layers:
-        matched, exhausted = _decoded_boundary_kind(layer, allow_token)
+        matched, exhausted = _decoded_boundary_kind(
+            layer, allow_token, restart_closer
+        )
         if matched or exhausted:
             return matched, exhausted
     return False, False
 
 
-def _raw_residual_boundary(candidate, start):
+def _raw_residual_boundary(candidate, start, restart_closer=None):
     """线性扫描 raw 短 token 和连续结构分隔符；percent 交给 probe。"""
     if start >= len(candidate):
         return False, False, False
@@ -299,9 +306,15 @@ def _raw_residual_boundary(candidate, start):
 
     index = start
     token_length = 0
+    token_characters = 0
     separator_characters = 0
-    separator_started = False
     while index < len(candidate):
+        if restart_closer and candidate.startswith(restart_closer, index):
+            index += len(restart_closer)
+            separator_characters = 0
+            token_length = 0
+            token_characters = 0
+            continue
         character = candidate[index]
         if character == "=":
             return token_length > 0, False, False
@@ -313,9 +326,6 @@ def _raw_residual_boundary(candidate, start):
         if separator_exhausted:
             return False, False, True
         if separator_end is not None:
-            if separator_started and token_length:
-                return False, False, False
-            separator_started = True
             token_length = 0
             separator_characters += separator_end - index
             if separator_characters > MAX_RESIDUAL_SEPARATOR_CHARACTERS:
@@ -327,14 +337,15 @@ def _raw_residual_boundary(candidate, start):
             or character in RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS
         ):
             return False, False, False
-        if token_length == MAX_RESIDUAL_TOKEN_CHARACTERS:
+        if token_characters == MAX_RESIDUAL_TOKEN_CHARACTERS:
             return False, False, True
         index += 1
         token_length += 1
-    return False, False, token_length > 0
+        token_characters += 1
+    return False, False, token_characters > 0 or separator_characters > 0
 
 
-def _is_wrapper_closer_boundary(candidate, end, outer_openers):
+def _is_wrapper_closer_boundary(candidate, end, closer, outer_openers):
     """Distinguish document closers from legal URI sub-delimiters."""
     if end == len(candidate):
         return True
@@ -342,13 +353,17 @@ def _is_wrapper_closer_boundary(candidate, end, outer_openers):
         return True
     if any(candidate.startswith(WRAPPER_CLOSERS[opener], end) for opener in outer_openers):
         return True
-    residual, requires_probe, exhausted = _raw_residual_boundary(candidate, end)
+    residual, requires_probe, exhausted = _raw_residual_boundary(
+        candidate, end, closer
+    )
     if exhausted:
         return None
     if residual:
         return True
     if requires_probe:
-        residual, exhausted = _bounded_boundary_probe(candidate, end, allow_token=True)
+        residual, exhausted = _bounded_boundary_probe(
+            candidate, end, allow_token=True, restart_closer=closer
+        )
         if exhausted:
             return None
     return residual or DRIVE_PREFIX.match(candidate, end) is not None
@@ -485,7 +500,10 @@ def _split_url_candidate(candidate, leading_delimiters=()):
             and candidate.startswith(expected_closer, index)
         ):
             boundary = _is_wrapper_closer_boundary(
-                candidate, index + len(expected_closer), wrapper_openers[1:]
+                candidate,
+                index + len(expected_closer),
+                expected_closer,
+                wrapper_openers[1:],
             )
             if boundary is None:
                 return None
