@@ -16,6 +16,8 @@ from typing import Any, Callable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "tests/behavioral-cases.json"
+SKILL_SOURCE = ROOT / "SKILL.md"
+SKILL_REQUEST_PATH = Path("SKILL.md")
 RESULT_SCHEMA_VERSION = 1
 REQUEST_SCHEMA_VERSION = 1
 EXIT_SUCCESS = 0
@@ -70,7 +72,7 @@ def select_cases(cases: list[dict[str, Any]], selected: Sequence[str]) -> list[d
 def request_for(case: dict[str, Any]) -> dict[str, Any]:
     return {
         "schemaVersion": REQUEST_SCHEMA_VERSION,
-        "skill": "SKILL.md",
+        "skill": str(SKILL_REQUEST_PATH),
         "freshContextRequired": True,
         "case": {
             "id": case["id"],
@@ -117,9 +119,18 @@ def run_case(
     input_text = json.dumps(request, ensure_ascii=False) + "\n"
 
     # A fresh writable directory is the complete filesystem boundary we can
-    # provide portably. POSIX additionally gets a fresh process group so a
-    # timeout or interrupt can terminate evaluator descendants as one unit.
+    # provide portably. Supply the repository skill as a read-only snapshot in
+    # that directory so the request's relative path resolves without passing
+    # the repository path to the evaluator. POSIX additionally gets a fresh
+    # process group so a timeout or interrupt can terminate descendants.
     with tempfile.TemporaryDirectory(prefix="behavioral-evaluator-") as workdir:
+        skill_path = Path(workdir) / SKILL_REQUEST_PATH
+        try:
+            skill_path.write_bytes(SKILL_SOURCE.read_bytes())
+            skill_path.chmod(0o444)
+        except OSError as exc:
+            raise RunnerError(f"cannot stage skill source: {exc}") from exc
+
         popen_options: dict[str, Any] = {
             "cwd": workdir,
             "stdin": subprocess.PIPE,

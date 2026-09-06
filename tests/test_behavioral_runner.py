@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -99,6 +100,35 @@ print(json.dumps({"request": request, "cwd": os.getcwd()}, ensure_ascii=False))
         evaluator_cwd = Path(response["cwd"])
         self.assertNotEqual(evaluator_cwd, PACKAGE_ROOT)
         self.assertFalse(evaluator_cwd.exists())
+
+    def test_real_evaluator_reads_actual_read_only_skill_snapshot(self):
+        self.write_cases("skill-source")
+        evaluator = """
+import json
+from pathlib import Path
+import stat
+import sys
+
+request = json.load(sys.stdin)
+skill_path = Path(request["skill"])
+print(json.dumps({
+    "path": str(skill_path),
+    "content": skill_path.read_text(encoding="utf-8"),
+    "mode": stat.S_IMODE(skill_path.stat().st_mode),
+}))
+"""
+        status, _, stderr = self.run_custom([sys.executable, "-c", evaluator])
+
+        self.assertEqual((status, stderr), (runner.EXIT_SUCCESS, ""))
+        result = json.loads(self.output.read_text(encoding="utf-8"))["results"][0]
+        response = json.loads(result["response"])
+        self.assertEqual(response["path"], "SKILL.md")
+        self.assertEqual(
+            response["content"],
+            (PACKAGE_ROOT / "SKILL.md").read_text(encoding="utf-8"),
+        )
+        write_bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+        self.assertEqual(response["mode"] & write_bits, 0)
 
     def test_real_nonzero_exit_is_a_case_failure_and_later_case_runs(self):
         self.write_cases("bad", "good")
