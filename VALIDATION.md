@@ -71,7 +71,7 @@ verifies only internal version, file-set, and hash consistency; it does not prov
 source provenance, a local or remote Git tag, a GitHub Release, or resistance to
 malicious tampering.
 
-## COD-16 integrated-candidate verification
+## Integrated-candidate verification
 
 This verification was run locally on macOS on 2026-09-06 against the later
 integrated candidate. Its 71-test count supersedes the earlier 61-test snapshots
@@ -84,19 +84,22 @@ remote-tag check, or a GitHub Release check.
 | `python3.12 -B -m unittest discover -s tests -v` | 71 tests passed. |
 | Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
 | `scripts/check_package.py` | Reported only `RELEASE_CHECKSUMS.txt` hash mismatches for integrated candidate files. |
-| `SKILL.md` byte comparison | Unchanged from the COD-16 input commit. |
+| `SKILL.md` byte comparison | Unchanged from the integrated-candidate input commit. |
 
-`RELEASE_CHECKSUMS.txt` is intentionally not updated in this task. COD-17 must
-recompute it from the final reviewed candidate; until then, the package checker
-correctly reports manifest drift rather than a clean package result.
+`RELEASE_CHECKSUMS.txt` was intentionally not updated at this intermediate
+stage. The final candidate gate recomputed it from the reviewed candidate; until
+then, the package checker correctly reported manifest drift rather than a clean
+package result.
 
-## COD-17 final local-candidate gate
+## Final local-candidate gate
 
-The final local gate was run on macOS on 2026-09-06 after integrating COD-13
-through COD-16 and regenerating `RELEASE_CHECKSUMS.txt` from the resulting file
-set. This is local candidate evidence only. It does not substitute for the
+The final local gate was run on macOS on 2026-09-06 after integrating the
+candidate changes and regenerating `RELEASE_CHECKSUMS.txt` from the resulting
+file set. This is local candidate evidence only. It does not substitute for the
 required hosted Ubuntu/macOS and Python 3.10–3.13 matrix, independent review,
-remote-tag verification, or GitHub Release verification.
+remote-tag verification, or GitHub Release verification. Any later integration
+that changes a packaged file requires the release coordinator to rebuild this
+checksum manifest before the final gate is repeated.
 
 | Check | Observed result |
 | --- | --- |
