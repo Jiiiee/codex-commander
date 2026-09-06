@@ -127,10 +127,10 @@ tokens, invalid escapes, and exhausted decode depth also fail closed.
 The final scanner gate additionally covers repeated and alternating wrapper
 closers, wrapper openers, paired punctuation, braces, and bounded HTML entities
 as grammar-derived document evidence in both raw and percent-decoded residuals.
-An independent stage matrix exercised 7,068 reject cases across 19 wrappers and
-32 document markers with no fail-open, while nine explicit-link and benign URI
-token controls produced no false positive. Focused maximum/overflow and linear
-work assertions also passed.
+The committed regression suite exercises those cross-category combinations as
+part of the 135 tests reported above, together with explicit-link and benign URI
+token controls. Its maximum/overflow and linear-work assertions are also part of
+that reproducible candidate suite.
 
 ## Version 0.1.3: bilingual publication preparation
 
