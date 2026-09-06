@@ -352,6 +352,77 @@ records.apply_plan(plan)
         self.assertEqual(stat.S_IMODE((self.root / "AGENTS.md").stat().st_mode), expected)
         self.assertEqual(stat.S_IMODE((self.root / "docs/commander.md").stat().st_mode), expected)
 
+    def test_two_roots_restore_process_umask_and_create_with_the_original_mode(self):
+        other_temporary = tempfile.TemporaryDirectory(prefix="commander-other-root-")
+        self.addCleanup(other_temporary.cleanup)
+        roots = (self.root, Path(other_temporary.name).resolve())
+        plans = []
+        for root in roots:
+            (root / "docs").mkdir()
+            (root / "docs/commander.md").write_bytes(b"# Existing plan\n")
+            plans.append(records.plan_records(root, "en", "maintainable", "A local tool"))
+
+        real_umask = os.umask
+        first_set = threading.Event()
+        second_set = threading.Event()
+        first_restored = threading.Event()
+        bookkeeping_lock = threading.Lock()
+        roles = {}
+        calls = {}
+        next_role = 0
+
+        def interleave_umask(value):
+            nonlocal next_role
+            identity = threading.get_ident()
+            with bookkeeping_lock:
+                calls[identity] = calls.get(identity, 0) + 1
+                if calls[identity] == 1:
+                    next_role += 1
+                    roles[identity] = next_role
+                role = roles[identity]
+                call = calls[identity]
+            previous = real_umask(value)
+            if call == 1 and role == 1:
+                first_set.set()
+                second_set.wait(timeout=0.25)
+            elif call == 1:
+                second_set.set()
+                first_restored.wait(timeout=0.25)
+            elif role == 1:
+                first_restored.set()
+            return previous
+
+        errors = []
+
+        def apply(plan):
+            try:
+                records.apply_plan(plan)
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        original_umask = real_umask(0o022)
+        try:
+            with mock.patch.object(records.os, "umask", side_effect=interleave_umask):
+                first = threading.Thread(target=apply, args=(plans[0],))
+                second = threading.Thread(target=apply, args=(plans[1],))
+                first.start()
+                self.assertTrue(first_set.wait(timeout=2))
+                second.start()
+                first.join(timeout=5)
+                second.join(timeout=5)
+            final_umask = real_umask(0o022)
+        finally:
+            real_umask(original_umask)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(final_umask, 0o022)
+        self.assertEqual(
+            [stat.S_IMODE((root / "AGENTS.md").stat().st_mode) for root in roots],
+            [0o644, 0o644],
+        )
+
     def test_partial_failure_is_reported_and_rerun_is_safe(self):
         original_write = records.write_change
 

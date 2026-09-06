@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import threading
 import uuid
 
 try:
@@ -22,6 +23,7 @@ except ImportError:  # Windows keeps preview support but apply is refused below.
 BEGIN = "<!-- codex-commander:begin -->"
 END = "<!-- codex-commander:end -->"
 LEVELS = ("prototype", "maintainable", "production")
+_UMASK_LOCK = threading.Lock()
 
 TEXT = {
     "en": {
@@ -353,16 +355,19 @@ def write_temporary(parent_fd: int, path: Path, content: bytes, mode: int | None
             if mode is None:
                 # Capture the caller's normal file mode while forcing this carrier
                 # private until all content has been handed to the file object.
-                previous_umask = os.umask(0o077)
-                try:
-                    descriptor = os.open(
-                        temporary,
-                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                        0o666,
-                        dir_fd=parent_fd,
-                    )
-                finally:
-                    os.umask(previous_umask)
+                with _UMASK_LOCK:
+                    # umask is process-wide, so its set/restore pair must not
+                    # interleave across independent project-root writers.
+                    previous_umask = os.umask(0o077)
+                    try:
+                        descriptor = os.open(
+                            temporary,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                            0o666,
+                            dir_fd=parent_fd,
+                        )
+                    finally:
+                        os.umask(previous_umask)
                 final_mode = 0o666 & ~previous_umask
             else:
                 descriptor = os.open(
