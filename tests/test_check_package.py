@@ -528,6 +528,81 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_wrapper_residual_tokens_and_html_entities_are_generic_and_bounded(self):
+        examples = (
+            "~~https://example.test/guide~~" + "path%3D%2FUsers%2Falice%2Fprivate",
+            "'https://example.test/guide'" + "file%253D%252Froot%252Fprivate",
+            "*https://example.test/guide*" + "path%3DC%3A%5CUsers%5Calice%5Cprivate",
+            "*https://example.test/guide*" + "1path=/" + "Users/alice/private",
+            "~~https://example.test/guide~~" + "1=%2Froot%2Fprivate",
+            "_https://example.test/guide_" + "$HOME=/" + "opt/vendor/tool",
+            "~~https://example.test/guide~~" + "&AMP;path=/" + "Users/alice/private",
+            "https://example.test/guide&LT;" + "/%2Froot%2Fprivate",
+            "https://example.test/guide&GT;" + "/%252Fopt%252Fvendor",
+            "（https://example.test/guide）" + "9$cache%253D%252Fhome%252Falice%252Fprivate",
+            "~~https://example.test/guide~~" + "%26AmP%3B2%25253D%25252Froot%25252Fprivate",
+            "<https://example.test/guide>" + "&AMP;7%3DC%253A%255CUsers%255Calice",
+            "「https://example.test/guide」" + "路径%3D%2FUsers%2Falice%2Fprivate",
+            "*https://example.test/guide*" + "9$key%25%33%44%252Froot%252Fprivate",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_wrapper_residual_invalid_and_overlimit_encodings_fail_closed(self):
+        long_token = "x" * (checker.MAX_RESIDUAL_TOKEN_CHARACTERS + 1)
+        examples = (
+            "~~https://example.test/guide~~" + "key%ZZ=%2FUsers%2Falice%2Fprivate",
+            "*https://example.test/guide*" + "key%2525253D%2525252Froot%2525252Fprivate",
+            "_https://example.test/guide_" + long_token + "%3D%2Fopt%2Fvendor",
+            "~~https://example.test/guide~~" + "&AMP;AMP;AMP;AMP;key=/"
+            + "Users/alice/private",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_generic_wrapper_residual_rule_preserves_valid_url_forms(self):
+        examples = (
+            "https://user!$&'()*+,;=:pass@example.test/-._~!$&'()*+,;=:@/Users/alice/guide",
+            "https://[2001:db8::1]:8443/root/guide?key=$HOME=value#part_1",
+            "~~https://example.test/release~notes/Users/alice/guide~~",
+            "（https://example.test/release_notes/root/guide）",
+            "<https://example.test/release*notes/opt/tool>",
+            "https://example.test/Users/alice/guide https://example.test/root/guide",
+            "*https://example.test/release*notes/opt/tool*",
+            "_https://example.test/release_notes/home/alice/guide_",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
+    def test_generic_wrapper_residual_probe_has_bounded_linear_work(self):
+        class CountedString(str):
+            def __new__(cls, value, counts=None):
+                instance = super().__new__(cls, value)
+                instance.counts = counts if counts is not None else {"slice_work": 0}
+                return instance
+
+            def __getitem__(self, key):
+                value = super().__getitem__(key)
+                if isinstance(key, slice):
+                    self.counts["slice_work"] += len(value)
+                    return type(self)(value, self.counts)
+                return value
+
+        def residual_work(segments):
+            candidate = CountedString(
+                "https://example.test/" + "segment*" * segments
+                + "1path%253D%252FUsers%252Falice"
+            )
+            self.assertIsNotNone(checker._split_url_candidate(candidate, ("*",)))
+            return candidate.counts["slice_work"]
+
+        small_work = residual_work(256)
+        large_work = residual_work(512)
+        self.assertLessEqual(large_work, small_work * 2 + 1024)
+
     def test_url_boundary_residuals_use_bounded_percent_decoding(self):
         examples = (
             "https://example.test/guide\x1f/%" + "2FUsers%2Falice%2Fprivate",

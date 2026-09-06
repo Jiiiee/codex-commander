@@ -50,9 +50,10 @@ AMBIGUOUS_URL_PREFIX_CHARACTERS = frozenset("_*~'+-.%:/\\@")
 MAX_WRAPPER_CONTEXT_CHARACTERS = 4096
 MAX_WRAPPER_DEPTH = 32
 CONTEXT_LIMIT = "<wrapper-context-limit>"
-HTML_WRAPPER_BOUNDARIES = ("&amp;lt;", "&amp;gt;", "&lt;", "&gt;")
-DIRECT_KEY_VALUE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*=")
-HTML_KEY_VALUE = re.compile(r"&(?:amp;)*(?:[A-Za-z_][A-Za-z0-9_.-]*)=")
+MAX_RESIDUAL_TOKEN_CHARACTERS = 64
+MAX_RESIDUAL_SOURCE_CHARACTERS = 512
+MAX_HTML_ENTITY_LAYERS = 3
+RESIDUAL_TOKEN_PUNCTUATION = frozenset("_$.-")
 DRIVE_PREFIX = re.compile(r"[A-Za-z](?::|%[0-9A-Fa-f]{2})")
 WRAPPER_CLOSERS = {
     "(": ")",
@@ -131,6 +132,101 @@ def _url_wrapper_openers(content, start):
     return tuple(openers)
 
 
+def _ascii_case_insensitive_startswith(value, start, token):
+    """Compare a fixed ASCII token without allocating an unbounded suffix."""
+    if start + len(token) > len(value):
+        return False
+    for offset, expected in enumerate(token):
+        actual = value[start + offset]
+        if actual == expected:
+            continue
+        if "A" <= actual <= "Z":
+            actual = chr(ord(actual) + 32)
+        if actual != expected:
+            return False
+    return True
+
+
+def _decoded_html_prefix(value):
+    """Return the text after a bounded, case-insensitive ``&amp;`` prefix."""
+    if not value.startswith("&"):
+        return 0, False
+    index = 1
+    layers = 0
+    while _ascii_case_insensitive_startswith(value, index, "amp;"):
+        if layers == MAX_HTML_ENTITY_LAYERS:
+            return index, True
+        index += 4
+        layers += 1
+    return index, False
+
+
+def _decoded_boundary_kind(value, allow_token):
+    """Recognize a generic decoded wrapper residual using fixed-size grammar."""
+    index = 0
+    if value.startswith("&"):
+        index, exhausted = _decoded_html_prefix(value)
+        if exhausted:
+            return False, True
+        if (
+            _ascii_case_insensitive_startswith(value, index, "lt;")
+            or _ascii_case_insensitive_startswith(value, index, "gt;")
+        ):
+            return True, False
+        if not allow_token:
+            return False, False
+    elif not allow_token:
+        return False, False
+
+    token_length = 0
+    while index < len(value) and (
+        value[index].isalnum() or value[index] in RESIDUAL_TOKEN_PUNCTUATION
+    ):
+        if token_length == MAX_RESIDUAL_TOKEN_CHARACTERS:
+            return False, True
+        index += 1
+        token_length += 1
+    return token_length > 0 and index < len(value) and value[index] == "=", False
+
+
+def _bounded_boundary_probe(candidate, start, allow_token):
+    """Decode only a fixed-size original-string window when probing a boundary."""
+    source_end = min(len(candidate), start + MAX_RESIDUAL_SOURCE_CHARACTERS)
+    source = candidate[start:source_end]
+    layers = _bounded_percent_decodings(source)
+    if _percent_decoding_limit_exhausted(layers):
+        return False, True
+    for layer in layers:
+        matched, exhausted = _decoded_boundary_kind(layer, allow_token)
+        if matched or exhausted:
+            return matched, exhausted
+    return False, False
+
+
+def _raw_residual_boundary(candidate, start):
+    """Fast-path a raw short token and defer only encoded forms to decoding."""
+    if start >= len(candidate):
+        return False, False, False
+    if candidate[start] in "&%":
+        return False, True, False
+
+    index = start
+    token_length = 0
+    while index < len(candidate) and (
+        candidate[index].isalnum()
+        or candidate[index] in RESIDUAL_TOKEN_PUNCTUATION
+    ):
+        if token_length == MAX_RESIDUAL_TOKEN_CHARACTERS:
+            return False, False, True
+        index += 1
+        token_length += 1
+    if not token_length:
+        return False, False, False
+    if index < len(candidate) and candidate[index] == "=":
+        return True, False, False
+    return False, index < len(candidate) and candidate[index] == "%", False
+
+
 def _is_wrapper_closer_boundary(candidate, end, outer_openers):
     """Distinguish document closers from legal URI sub-delimiters."""
     if end == len(candidate):
@@ -139,9 +235,16 @@ def _is_wrapper_closer_boundary(candidate, end, outer_openers):
         return True
     if any(candidate.startswith(WRAPPER_CLOSERS[opener], end) for opener in outer_openers):
         return True
-    if DIRECT_KEY_VALUE.match(candidate, end) or HTML_KEY_VALUE.match(candidate, end):
+    residual, requires_decoding, exhausted = _raw_residual_boundary(candidate, end)
+    if exhausted:
+        return None
+    if residual:
         return True
-    return DRIVE_PREFIX.match(candidate, end) is not None
+    if requires_decoding:
+        residual, exhausted = _bounded_boundary_probe(candidate, end, allow_token=True)
+        if exhausted:
+            return None
+    return residual or DRIVE_PREFIX.match(candidate, end) is not None
 
 
 def _bounded_url_boundary_tail(content, start):
@@ -257,9 +360,15 @@ def _split_url_candidate(candidate, leading_delimiters=()):
     end = len(candidate)
     for index in range(end):
         character = candidate[index]
-        if any(candidate.startswith(boundary, index) for boundary in HTML_WRAPPER_BOUNDARIES):
-            end = index
-            break
+        if character == "&":
+            html_boundary, exhausted = _bounded_boundary_probe(
+                candidate, index, allow_token=False
+            )
+            if exhausted:
+                return None
+            if html_boundary:
+                end = index
+                break
         if character in NON_URI_DOCUMENT_DELIMITERS:
             end = index
             break
@@ -267,12 +376,15 @@ def _split_url_candidate(candidate, leading_delimiters=()):
             wrapper_openers
             and expected_closer not in closer_counts
             and candidate.startswith(expected_closer, index)
-            and _is_wrapper_closer_boundary(
+        ):
+            boundary = _is_wrapper_closer_boundary(
                 candidate, index + len(expected_closer), wrapper_openers[1:]
             )
-        ):
-            end = index
-            break
+            if boundary is None:
+                return None
+            if boundary:
+                end = index
+                break
         if character in opener_counts:
             opener_counts[character] += 1
         elif character in closer_counts:
