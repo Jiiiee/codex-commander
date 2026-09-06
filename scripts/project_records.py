@@ -4,13 +4,20 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
+import errno
 import json
 import os
 from pathlib import Path
 import stat
 import sys
-import tempfile
+import uuid
+
+try:
+    import fcntl
+except ImportError:  # Windows keeps preview support but apply is refused below.
+    fcntl = None
 
 BEGIN = "<!-- codex-commander:begin -->"
 END = "<!-- codex-commander:end -->"
@@ -239,28 +246,174 @@ def assert_unchanged(root: Path, change: Change) -> None:
         raise RecordError(f"File changed since preview; inspect and replan: {change.path}")
 
 
-def write_change(root: Path, change: Change) -> None:
-    check_target(root, change.path)
-    change.path.parent.mkdir(parents=True, exist_ok=True)
-    assert_unchanged(root, change)
-    if change.before is None:
-        with change.path.open("xb") as handle:
-            handle.write(change.after)
-        return
-    temporary = None
+def anchored_writes_supported() -> bool:
+    return ANCHORED_WRITES_SUPPORTED
+
+
+ANCHORED_WRITES_SUPPORTED = (
+    fcntl is not None
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and all(
+        function in os.supports_dir_fd
+        for function in (os.open, os.stat, os.unlink, os.mkdir, os.link, os.rename)
+    )
+)
+
+
+@contextmanager
+def open_root_directory(root: Path):
+    if not anchored_writes_supported():
+        raise RecordError(
+            "Apply requires directory-relative filesystem operations available on macOS/Linux; "
+            "preview remains available on this platform."
+        )
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(root, flags)
     try:
-        mode = stat.S_IMODE(change.path.stat().st_mode)
-        with tempfile.NamedTemporaryFile(prefix=".commander-", dir=change.path.parent, delete=False) as handle:
-            temporary = Path(handle.name)
-            handle.write(change.after)
+        visible = os.stat(root, follow_symlinks=False)
+        opened = os.fstat(descriptor)
+        if (visible.st_dev, visible.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RecordError("Project root changed while opening it; inspect and retry.")
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def open_parent_directory(root_fd: int, root: Path, path: Path, create: bool):
+    relative = path.relative_to(root)
+    descriptor = os.dup(root_fd)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        for part in relative.parts[:-1]:
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o777, dir_fd=descriptor)
+                os.fsync(descriptor)
+                child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor, relative.name
+    finally:
+        os.close(descriptor)
+
+
+def assert_directory_identity(path: Path, descriptor: int) -> None:
+    try:
+        visible = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise RecordError(f"Output parent changed during apply: {path}") from exc
+    opened = os.fstat(descriptor)
+    if not stat.S_ISDIR(visible.st_mode) or (visible.st_dev, visible.st_ino) != (
+        opened.st_dev,
+        opened.st_ino,
+    ):
+        raise RecordError(f"Output parent changed during apply: {path}")
+
+
+def read_optional_at(parent_fd: int, name: str) -> bytes | None:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise RecordError(f"Output is not a regular file: {name}")
+        return handle.read()
+
+
+def assert_unchanged_at(parent_fd: int, change: Change, name: str) -> None:
+    if read_optional_at(parent_fd, name) != change.before:
+        raise RecordError(f"File changed since preview; inspect and replan: {change.path}")
+
+
+@contextmanager
+def exclusive_apply(root_fd: int, root: Path):
+    """Serialize helper writers with a kernel lock on the opened root directory."""
+    try:
+        fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
+        raise RecordError(f"Another apply may be running for {root}; inspect and retry.") from exc
+    try:
+        yield
+    finally:
+        fcntl.flock(root_fd, fcntl.LOCK_UN)
+
+
+def write_temporary(parent_fd: int, path: Path, content: bytes, mode: int | None) -> str:
+    for _ in range(100):
+        temporary = f".commander-{uuid.uuid4().hex}"
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o666,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            continue
+        break
+    else:  # pragma: no cover - requires repeated UUID collisions or hostile creation
+        raise RecordError(f"Could not reserve a temporary file beside {path}.")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
-        assert_unchanged(root, change)
-        os.replace(temporary, change.path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    return temporary
+
+
+def write_change(root_fd: int, root: Path, change: Change) -> None:
+    check_target(root, change.path)
+    with open_parent_directory(root_fd, root, change.path, create=True) as (parent_fd, name):
+        assert_directory_identity(change.path.parent, parent_fd)
+        assert_unchanged_at(parent_fd, change, name)
+        mode = None
+        if change.before is not None:
+            mode = stat.S_IMODE(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode)
+        temporary = write_temporary(parent_fd, change.path, change.after, mode)
+        try:
+            assert_directory_identity(change.path.parent, parent_fd)
+            assert_unchanged_at(parent_fd, change, name)
+            if change.before is None:
+                os.link(
+                    temporary,
+                    name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                os.fsync(parent_fd)
+                os.unlink(temporary, dir_fd=parent_fd)
+                temporary = None
+                os.fsync(parent_fd)
+            else:
+                os.rename(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                temporary = None
+                os.fsync(parent_fd)
+            assert_directory_identity(change.path.parent, parent_fd)
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                except FileNotFoundError:
+                    pass
 
 
 def apply_plan(plan: Plan) -> list[str]:
@@ -268,12 +421,14 @@ def apply_plan(plan: Plan) -> list[str]:
     try:
         if checked_root(plan.root) != plan.root:
             raise RecordError("Project identity changed since preview.")
-        for change in plan.changes:
-            assert_unchanged(plan.root, change)
-        for change in plan.changes:
-            if change.action != "unchanged":
-                write_change(plan.root, change)
-                written.append(str(change.path.relative_to(plan.root)))
+        with open_root_directory(plan.root) as root_fd:
+            with exclusive_apply(root_fd, plan.root):
+                for change in plan.changes:
+                    assert_unchanged(plan.root, change)
+                for change in plan.changes:
+                    if change.action != "unchanged":
+                        write_change(root_fd, plan.root, change)
+                        written.append(str(change.path.relative_to(plan.root)))
     except (OSError, RecordError) as exc:
         detail = ", ".join(written) if written else "none confirmed"
         raise RecordError(f"Apply did not finish: {exc}. Files written before failure: {detail}. Inspect before retrying.") from exc

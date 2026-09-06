@@ -51,8 +51,16 @@ The helper:
   section is preserved byte-for-byte. Duplicate/malformed markers cause a refusal.
 - Creates `docs/commander.md` only when absent. Existing content is never replaced;
   reconcile the live plan and language manually within the authorized scope.
-- Checks all intended targets before applying and uses per-file safe writes.
-  It is a **single-writer helper**, not a transactional database or lock service.
+- Checks all intended targets before applying and uses per-file safe writes. On
+  macOS/Linux, apply operations are anchored to opened directory handles and
+  directory entries are synced after publication and cleanup. Platforms without
+  the required Python directory-relative APIs (including Windows) can preview but
+  apply is refused rather than silently using weaker path-based writes.
+- Serializes **cooperating writers that use this helper**. It is not a transactional
+  database and does not provide atomic compare-and-swap against external programs
+  that ignore its lock. On supported systems the helper takes a kernel advisory
+  lock on its opened project-root directory; it creates no shared lock path, and
+  the kernel releases the lock when the descriptor closes or the process exits.
   After a filesystem failure, inspect the reported partial state before rerunning.
 
 Read the generated record and replace pending information with actual decisions

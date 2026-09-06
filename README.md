@@ -81,7 +81,47 @@ copy the folder to the host's supported skill location or use an appropriate
 directory link. Refresh the skill list or restart the client if it does not appear.
 
 No API key, package install, or upstream `grill-me` installation is required.
-The optional project-record helper and automated tests require Python 3.10+.
+The optional project-record helper and automated tests support Python 3.10–3.13.
+
+## Python compatibility, local upgrades, and maintenance
+
+This skill has no runtime dependency beyond the standard library. We separate a
+documented support baseline, configured CI targets, and local evidence so that a
+configuration file is not mistaken for a completed hosted run:
+
+| Python | Documented support | Configured CI target | Current local evidence |
+| --- | --- | --- | --- |
+| 3.10 | Minimum supported version. | Ubuntu and macOS. | Not recorded for this working tree. |
+| 3.11 | Included in the supported range. | Not currently a CI target. | 61 tests and the package check passed on macOS. |
+| 3.12 | Included in the supported range. | Ubuntu and macOS. | 61 tests and the package check passed on macOS. |
+| 3.13 | Included in the supported range. | Ubuntu and macOS. | Not recorded for this working tree. |
+| Future minor versions | Not declared until reviewed. | None until added deliberately. | None. |
+
+The repository's GitHub Actions workflow is configured for the listed CI
+targets, but no GitHub-hosted run is claimed here. A configured matrix is not
+execution evidence; see [VALIDATION.md](VALIDATION.md) for the exact local
+commands and historical results.
+
+Local copies and symbolic links are intentionally review-first, not an automatic
+update channel. To upgrade, inspect the actual supported skills-directory entry
+and whether it is a directory or link; prepare and compare a candidate source in
+a separate location; run the package check and tests there; then explicitly
+choose whether to repoint a link or replace a copied directory. Keep the current
+copy until the candidate has been reviewed and validated. Do not overlay an
+existing installation with a recursive copy or force-replace a link, and refresh
+the client only after the chosen change is complete.
+
+Maintainers update `VERSION`, the support matrix, and `VALIDATION.md` together.
+When changing compatibility, test the affected Python and operating-system
+combinations and record which results are local evidence versus completed hosted
+CI. When changing delegation or other behavior, update the behavioral cases and
+record only the runtime evidence actually obtained. A release is not implied by
+these maintenance steps.
+
+The current source is prepared as the **v0.2.0 release candidate**. No Git tag
+or hosted release has been created. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for
+the intended tag and user-visible changes, and
+[RELEASE_CHECKSUMS.txt](RELEASE_CHECKSUMS.txt) for the candidate file manifest.
 
 ## Use
 
@@ -109,6 +149,25 @@ Project membership, the checkout/worktree used for files, and sidebar sections
 are separate concerns. Asking for a sidebar team does not request a new section.
 An explicitly requested custom section is supported while retaining the correct
 project binding. Existing project pins/sections are not rearranged automatically.
+
+## Relationship to upstream `grill-me` and `grilling`
+
+The names below describe each repository's own mechanism; they are not official
+cross-project standards. At the upstream commit reviewed by this project,
+[`grill-me`](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/productivity/grill-me/SKILL.md)
+delegates to
+[`grilling`](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/productivity/grilling/SKILL.md).
+Codex Commander is self-contained and adapts the interview idea as follows:
+
+| Topic | Reviewed upstream mechanism | Codex Commander mechanism |
+| --- | --- | --- |
+| Frontier and stopping rule | `grilling` models a design tree. Its **frontier** is every decision whose prerequisites are settled; the session ends when that frontier is empty after every branch has been visited. | Codex Commander does not require an explicit design tree or exhaustive frontier. It stops when the current goal, boundaries, significant risks and acceptance criteria are sufficient for the next authorized step; the user may stop sooner, with unresolved risks disclosed. |
+| Question cadence | `grilling` asks the whole current frontier in a numbered round, then waits and recomputes it from the answers. | Codex Commander asks a consequential question first and groups independent questions only when the group remains easy to answer. A clear small change may require no additional questions. |
+| `Prototype` | Upstream's separate [`prototype` skill](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/engineering/prototype/SKILL.md) uses the word for throwaway code that answers a design question. | **Prototype (轻量验证)** is this project's delivery-level label: validate one complete, narrow path with appropriate safeguards. It does not imply throwaway code, and it is separate from team size. |
+
+These are scope and workflow differences, not claims that either approach is
+faster, more capable, or generally better. See [NOTICE.md](NOTICE.md) for the
+reviewed upstream version and attribution.
 
 ## Compatibility and limits
 

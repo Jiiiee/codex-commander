@@ -5,6 +5,41 @@ of a workflow. Run the cases in `behavioral-cases.json` with an independent agen
 that receives the skill and the scenario's raw inputs, not this rubric or a
 suggested answer. Use fresh context per case when evaluating release changes.
 
+## Runner
+
+The standard-library runner makes the 13 case inputs and evaluator outputs
+repeatable without claiming that a completed subprocess is a behavioral pass.
+It never creates real tasks itself.
+
+First inspect the ordered case IDs, then create a dry-run record:
+
+```sh
+python3 scripts/run_behavioral_cases.py --list
+python3 scripts/run_behavioral_cases.py --dry-run \
+  --output .local-evaluation/behavioral-results.json
+```
+
+`--dry-run` does not accept or launch an evaluator command. Real evaluation is a
+separate, explicit boundary: `--run` requires `--command`, starts that command
+once per case, sends one JSON request on standard input, and records standard
+output, standard error, exit failures, or timeouts. The command must create a
+fresh agent context, load `SKILL.md`, and expose only the request's raw `case`
+fields to the evaluator. It must not expose this rubric or a suggested answer.
+
+```sh
+python3 scripts/run_behavioral_cases.py --run \
+  --output .local-evaluation/behavioral-results.json \
+  --command /path/to/isolated-evaluator
+```
+
+The result file uses schema version 1 and preserves source order. Each item is
+`planned`, `completed`, or `failed`; the process exits nonzero when any evaluator
+fails but still records later cases. A `completed` item is raw evidence awaiting
+review against the criteria below, not an automatic pass. Use repeated `--case`
+options to rerun affected cases. Keep result files under the ignored
+`.local-evaluation/` directory unless a separate sanitized publication is
+explicitly approved.
+
 For the filesystem case, give the evaluator an isolated temporary project with
 an existing `AGENTS.md`. Let it use the real helper or safe edits there. Never
 give it live customer projects, credentials, or permission to create real tasks.

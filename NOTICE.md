@@ -1,13 +1,24 @@
 # Attribution and design provenance
 
 Codex Commander is independently authored. Its interview approach was informed
-by Matt Pocock's MIT-licensed [skills](https://github.com/mattpocock/skills)
-repository, reviewed at commit
-`6654f6b60cd9d5be8b54c6fafe44346dabeb3b76`.
+by Matt Pocock's MIT-licensed
+[skills repository](https://github.com/mattpocock/skills/tree/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76),
+reviewed at commit `6654f6b60cd9d5be8b54c6fafe44346dabeb3b76`.
 
 Relevant upstream work includes `grill-me`/`grilling`, `to-spec`, `to-tickets`,
 `domain-modeling`, and `code-review`. We acknowledge Matt Pocock's work; this
 package is not an unmodified copy of those skills and does not require them.
+
+For the terminology comparison in the READMEs, the primary sources at that
+commit are upstream
+[`grill-me`](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/productivity/grill-me/SKILL.md),
+[`grilling`](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/productivity/grilling/SKILL.md),
+and
+[`prototype`](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/engineering/prototype/SKILL.md).
+The documented frontier, question-cadence, stopping-rule, and `Prototype`
+differences compare mechanisms and local vocabulary. They are not performance,
+quality, capability, or endorsement claims about either project, and this
+project does not present its own delivery-level labels as upstream terminology.
 
 Our changes include a delivery-bounded interview stopping rule, independent
 engineering-depth/team-size decisions, capability-checked cross-thread

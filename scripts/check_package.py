@@ -2,6 +2,7 @@
 """Read-only structural checks, not a claim of behavioral correctness."""
 
 import ast
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -12,11 +13,197 @@ SKIP = {".git", "__pycache__", ".local-evaluation", "dist"}
 REQUIRED = (
     "SKILL.md", "agents/openai.yaml", "README.md", "README.zh-CN.md", "LICENSE", "NOTICE.md",
     "licenses/mattpocock-skills-MIT.txt", "VERSION", "VALIDATION.md",
+    "RELEASE_NOTES.md", "RELEASE_CHECKSUMS.txt", ".github/workflows/ci.yml",
     "references/engineering-depth.md", "references/sidebar-coordination.md",
     "references/project-records.md", "scripts/project_records.py",
-    "tests/test_project_records.py", "tests/behavioral-cases.json",
+    "scripts/run_behavioral_cases.py", "tests/test_project_records.py",
+    "tests/test_behavioral_runner.py", "tests/test_check_package.py",
+    "tests/behavioral-cases.json",
     "tests/behavioral-evaluation.md",
 )
+VERSION_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+OPENAI_FIELDS = {"display_name", "short_description"}
+
+
+def check_version(root, errors):
+    path = root / "VERSION"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        errors.append("VERSION must be UTF-8")
+        return
+    version = text.removesuffix("\n")
+    if text not in {version, version + "\n"} or not VERSION_PATTERN.fullmatch(version):
+        errors.append("VERSION must be a canonical three-part numeric version")
+        return
+
+    validation = root / "VALIDATION.md"
+    if not validation.is_file():
+        return
+    try:
+        validation_text = validation.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        errors.append("VALIDATION.md must be UTF-8")
+        return
+    declared = re.search(r"^Version: ([0-9]+\.[0-9]+\.[0-9]+)\. Date:", validation_text, re.M)
+    if not declared:
+        errors.append("VALIDATION.md must declare its package version")
+    elif declared.group(1) != version:
+        errors.append(f"Version mismatch: VERSION is {version}, VALIDATION.md is {declared.group(1)}")
+
+    notes = root / "RELEASE_NOTES.md"
+    if notes.is_file():
+        try:
+            notes_text = notes.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            errors.append("RELEASE_NOTES.md must be UTF-8")
+        else:
+            declared_version = re.search(r"^Version: ([0-9]+\.[0-9]+\.[0-9]+)$", notes_text, re.M)
+            declared_tag = re.search(r"^Intended tag: (v[0-9]+\.[0-9]+\.[0-9]+)$", notes_text, re.M)
+            if not declared_version:
+                errors.append("RELEASE_NOTES.md must declare its package version")
+            elif declared_version.group(1) != version:
+                errors.append(
+                    f"Release-notes mismatch: VERSION is {version}, "
+                    f"RELEASE_NOTES.md is {declared_version.group(1)}"
+                )
+            if not declared_tag:
+                errors.append("RELEASE_NOTES.md must declare its intended v-prefixed tag")
+            elif declared_tag.group(1) != f"v{version}":
+                errors.append(
+                    f"Tag mismatch: expected v{version}, RELEASE_NOTES.md is {declared_tag.group(1)}"
+                )
+
+
+def release_files(root):
+    excluded = {".git", "RELEASE_CHECKSUMS.txt"}
+    return sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if path.is_file()
+        and not SKIP.intersection(path.relative_to(root).parts)
+        and str(path.relative_to(root)) not in excluded
+    )
+
+
+def check_release_checksums(root, errors):
+    checksum_path = root / "RELEASE_CHECKSUMS.txt"
+    version_path = root / "VERSION"
+    if not checksum_path.is_file() or not version_path.is_file():
+        return
+    try:
+        version = version_path.read_text(encoding="utf-8").strip()
+        lines = checksum_path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        errors.append("RELEASE_CHECKSUMS.txt and VERSION must be UTF-8")
+        return
+    expected_header = f"# Codex Commander v{version} release candidate SHA-256"
+    if not lines or lines[0] != expected_header:
+        errors.append(f"RELEASE_CHECKSUMS.txt header must match v{version}")
+        return
+    entries = {}
+    for number, line in enumerate(lines[1:], 2):
+        if not line:
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if not match:
+            errors.append(f"Invalid RELEASE_CHECKSUMS.txt line: {number}")
+            continue
+        digest, relative = match.groups()
+        if relative in entries:
+            errors.append(f"Duplicate release checksum entry: {relative}")
+        entries[relative] = digest
+
+    expected_files = release_files(root)
+    if sorted(entries) != expected_files:
+        missing = sorted(set(expected_files) - set(entries))
+        extra = sorted(set(entries) - set(expected_files))
+        if missing:
+            errors.append(f"Missing release checksum entries: {', '.join(missing)}")
+        if extra:
+            errors.append(f"Unexpected release checksum entries: {', '.join(extra)}")
+    for relative in sorted(set(entries).intersection(expected_files)):
+        observed = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+        if entries[relative] != observed:
+            errors.append(f"Release checksum mismatch: {relative}")
+
+
+def check_openai_yaml(root, errors):
+    path = root / "agents/openai.yaml"
+    if not path.is_file():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        errors.append("agents/openai.yaml must be UTF-8")
+        return
+    meaningful = [(number, line) for number, line in enumerate(lines, 1) if line.strip()]
+    if not meaningful or meaningful[0][1] != "interface:":
+        errors.append("agents/openai.yaml must contain a top-level interface mapping")
+        return
+
+    values = {}
+    for number, line in meaningful[1:]:
+        field = re.fullmatch(r"  ([a-z_]+):\s*(.+)", line)
+        if not field:
+            errors.append(f"Invalid agents/openai.yaml line: {number}")
+            continue
+        name, raw = field.groups()
+        if name not in OPENAI_FIELDS:
+            errors.append(f"Unexpected agents/openai.yaml field: {name}")
+            continue
+        if name in values:
+            errors.append(f"Duplicate agents/openai.yaml field: {name}")
+            continue
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            errors.append(f"Invalid quoted string in agents/openai.yaml: {name}")
+            continue
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"agents/openai.yaml field must be a nonempty string: {name}")
+            continue
+        values[name] = value
+    for name in sorted(OPENAI_FIELDS - values.keys()):
+        errors.append(f"Missing agents/openai.yaml field: {name}")
+
+
+def check_behavioral_cases(root, errors):
+    path = root / "tests/behavioral-cases.json"
+    if not path.is_file():
+        return
+    try:
+        cases = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return  # The general text/JSON checks report syntax and encoding errors.
+    if not isinstance(cases, list) or not cases:
+        errors.append("tests/behavioral-cases.json must be a nonempty array")
+        return
+
+    seen_ids = set()
+    required = {"id", "user", "context"}
+    for index, case in enumerate(cases):
+        label = f"Behavioral case {index}"
+        if not isinstance(case, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        missing = sorted(required - case.keys())
+        if missing:
+            errors.append(f"{label} missing required fields: {', '.join(missing)}")
+        case_id = case.get("id")
+        if not isinstance(case_id, str) or not case_id.strip():
+            errors.append(f"{label} id must be a nonempty string")
+        elif case_id in seen_ids:
+            errors.append(f"Duplicate behavioral case id: {case_id}")
+        else:
+            seen_ids.add(case_id)
+        if not isinstance(case.get("user"), str) or not case.get("user", "").strip():
+            errors.append(f"{label} user must be a nonempty string")
+        context = case.get("context")
+        if not isinstance(context, (str, dict)):
+            errors.append(f"{label} context must be a string or object")
 
 
 def check(root=ROOT):
@@ -44,6 +231,10 @@ def check(root=ROOT):
                     errors.append("Description is not a valid quoted string")
         if "[TODO" in text:
             errors.append("Unfinished skill scaffold")
+    check_version(root, errors)
+    check_release_checksums(root, errors)
+    check_openai_yaml(root, errors)
+    check_behavioral_cases(root, errors)
     for path in root.rglob("*"):
         if not path.is_file() or SKIP.intersection(path.relative_to(root).parts):
             continue

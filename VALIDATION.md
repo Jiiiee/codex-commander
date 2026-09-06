@@ -1,18 +1,20 @@
 # Validation status
 
-Version: 0.1.3. Date: 2026-09-02.
+Version: 0.2.0. Date: 2026-09-06.
 
 ## Automated checks
 
 | Check | Observed result |
 | --- | --- |
-| `python3 -B -m unittest discover -s tests -v` | 31 tests passed on Python 3.12.11 / macOS. |
+| `/opt/homebrew/bin/python3.11 -B -m unittest discover -s tests -v` | 61 tests passed on macOS. |
+| `/opt/homebrew/bin/python3.12 -B -m unittest discover -s tests -v` | 61 tests passed on macOS. |
 | `python3 -B scripts/check_package.py` | Passed: required resources, local links, Python/JSON syntax, and the package's narrow portability checks. |
 | Codex `skill-creator` bundled `quick_validate.py` | Passed: `Skill is valid!` |
 | `agents/openai.yaml` | Unchanged from the parsed and length-checked 0.1.1 version. |
 | Retained upstream MIT notice | Unchanged from 0.1.1, which was byte-identical to the reviewed upstream license. |
 
-The unit tests use isolated temporary directories and cover new records,
+The unit tests use isolated temporary directories and cover release metadata,
+checksums, new records,
 English/Simplified/Traditional Chinese, all engineering levels, idempotency,
 byte preservation, existing plans, malformed markers, unsafe roots, symlinks,
 changed files, permission preservation, and partial failure reporting.
@@ -23,6 +25,43 @@ no-op on a repeated run.
 The package's own tests and helpers use only the standard library. The separate
 bundled Codex validator needed PyYAML, which was supplied in an isolated tool
 environment rather than added as a runtime dependency of this skill.
+
+## Version 0.2.0 release-candidate evidence (unreleased)
+
+The following checks were run locally on macOS on 2026-09-06. They describe the
+current working tree. The intended tag is `v0.2.0`; no tag or hosted release
+has been created.
+
+| Check | Observed result |
+| --- | --- |
+| `/opt/homebrew/bin/python3.11 -B -m unittest discover -s tests -v` | 61 tests passed. |
+| `/opt/homebrew/bin/python3.11 -B scripts/check_package.py` | Passed. |
+| `/opt/homebrew/bin/python3.12 -B -m unittest discover -s tests -v` | 61 tests passed. |
+| `/opt/homebrew/bin/python3.12 -B scripts/check_package.py` | Passed. |
+| `.github/workflows/ci.yml` | Configures Ubuntu and macOS targets for Python 3.10, 3.12, and 3.13. No GitHub-hosted workflow execution was observed or is claimed. |
+
+Python 3.11 has local evidence above but is not currently a configured CI
+target. Python 3.10 and 3.13 are configured targets, not locally verified by
+this record. See the README compatibility matrix for the distinction between
+the declared Python 3.10–3.13 support range, configured CI, and observed local
+results.
+
+## Version 0.2.0: automated quality and safe record writes
+
+This release candidate adds a GitHub Actions matrix, a 13-case behavioral
+runner with machine-readable results, stricter structural validation, and
+negative tests for malformed package metadata. Project-record apply operations
+now use directory-relative file descriptors, durable directory synchronization,
+and a kernel advisory lock on supported macOS/Linux systems. Preview remains
+available on platforms without the required primitives, including Windows,
+while apply safely refuses there.
+
+The bilingual documentation now distinguishes documented support, configured
+CI, and observed local evidence; it also documents local upgrade and
+maintenance boundaries. `RELEASE_NOTES.md` declares version `0.2.0` and the
+intended tag `v0.2.0`. `RELEASE_CHECKSUMS.txt` records SHA-256 values for
+every candidate source file except the checksum manifest itself. The package
+checker verifies the version, tag, file set, and hashes together.
 
 ## Version 0.1.3: bilingual publication preparation
 

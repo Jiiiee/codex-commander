@@ -3,9 +3,11 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import stat
 import tempfile
+import threading
 import unittest
 from unittest import mock
 import sys
@@ -230,13 +232,21 @@ class ProjectRecordsTests(unittest.TestCase):
         self.apply()
         self.assertEqual(stat.S_IMODE(agents.stat().st_mode), 0o640)
 
+    def test_new_files_use_normal_creation_permissions(self):
+        reference = self.root / "reference"
+        reference.write_bytes(b"")
+        expected = stat.S_IMODE(reference.stat().st_mode)
+        self.apply()
+        self.assertEqual(stat.S_IMODE((self.root / "AGENTS.md").stat().st_mode), expected)
+        self.assertEqual(stat.S_IMODE((self.root / "docs/commander.md").stat().st_mode), expected)
+
     def test_partial_failure_is_reported_and_rerun_is_safe(self):
         original_write = records.write_change
 
-        def fail_on_agents(root, change):
+        def fail_on_agents(root_fd, root, change):
             if change.path.name == "AGENTS.md":
                 raise OSError("Injected test failure")
-            return original_write(root, change)
+            return original_write(root_fd, root, change)
 
         with mock.patch.object(records, "write_change", side_effect=fail_on_agents):
             with self.assertRaisesRegex(records.RecordError, "docs/commander.md"):
@@ -244,6 +254,191 @@ class ProjectRecordsTests(unittest.TestCase):
         original_record = (self.root / "docs/commander.md").read_bytes()
         self.apply()
         self.assertEqual((self.root / "docs/commander.md").read_bytes(), original_record)
+
+    def test_two_writers_cannot_apply_different_plans_from_same_snapshot(self):
+        english = self.plan(language="en")
+        chinese = self.plan(language="zh-CN")
+        entered = threading.Event()
+        release = threading.Event()
+        original_write = records.write_change
+
+        def pause_first_writer(root_fd, root, change):
+            if threading.current_thread().name == "english-writer" and not entered.is_set():
+                entered.set()
+                self.assertTrue(release.wait(timeout=5))
+            return original_write(root_fd, root, change)
+
+        outcome = []
+
+        def apply_english():
+            try:
+                outcome.append(records.apply_plan(english))
+            except Exception as exc:  # pragma: no cover - asserted below
+                outcome.append(exc)
+
+        with mock.patch.object(records, "write_change", side_effect=pause_first_writer):
+            writer = threading.Thread(target=apply_english, name="english-writer")
+            writer.start()
+            self.assertTrue(entered.wait(timeout=5))
+            with self.assertRaisesRegex(records.RecordError, "Another apply may be running"):
+                records.apply_plan(chinese)
+            release.set()
+            writer.join(timeout=5)
+
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(outcome, [["docs/commander.md", "AGENTS.md"]])
+        self.assertIn("# Commander project record", (self.root / "docs/commander.md").read_text())
+        self.assertIn("Codex Commander working agreement", (self.root / "AGENTS.md").read_text())
+
+    def test_interrupted_create_never_publishes_a_partial_target(self):
+        plan = self.plan()
+        real_link = os.link
+
+        def interrupt_publish(source, target, **kwargs):
+            if target == "commander.md":
+                raise OSError("Injected interruption before publish")
+            return real_link(source, target, **kwargs)
+
+        with mock.patch.object(records.os, "link", side_effect=interrupt_publish):
+            with self.assertRaisesRegex(records.RecordError, "Injected interruption"):
+                records.apply_plan(plan)
+
+        self.assertFalse((self.root / "docs/commander.md").exists())
+        self.assertEqual(list(self.root.glob(".codex-commander*")), [])
+        self.assertEqual(list((self.root / "docs").glob(".commander-*")), [])
+        self.assertEqual(records.apply_plan(plan), ["docs/commander.md", "AGENTS.md"])
+
+    def test_cooperating_writer_is_rejected_during_replace_window(self):
+        agents = self.root / "AGENTS.md"
+        agents.write_text("Existing rules\n")
+        first = self.plan(language="en")
+        second = self.plan(language="zh-CN")
+        checked = threading.Event()
+        release = threading.Event()
+        real_rename = os.rename
+
+        def pause_before_replace(source, target, **kwargs):
+            if threading.current_thread().name == "first-writer" and target == agents.name:
+                checked.set()
+                self.assertTrue(release.wait(timeout=5))
+            return real_rename(source, target, **kwargs)
+
+        outcome = []
+
+        def apply_first():
+            try:
+                outcome.append(records.apply_plan(first))
+            except Exception as exc:  # pragma: no cover - asserted below
+                outcome.append(exc)
+
+        with mock.patch.object(records.os, "rename", side_effect=pause_before_replace):
+            writer = threading.Thread(target=apply_first, name="first-writer")
+            writer.start()
+            self.assertTrue(checked.wait(timeout=5))
+            with self.assertRaisesRegex(records.RecordError, "Another apply may be running"):
+                records.apply_plan(second)
+            release.set()
+            writer.join(timeout=5)
+
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(outcome, [["docs/commander.md", "AGENTS.md"]])
+        self.assertIn("Codex Commander working agreement", agents.read_text())
+        self.assertNotIn("Codex Commander 协作约定", agents.read_text())
+
+    def test_create_and_cleanup_each_sync_the_parent_directory(self):
+        change = self.plan().changes[0]
+        events = []
+        real_fsync, real_link, real_unlink = os.fsync, os.link, os.unlink
+
+        def record_fsync(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                events.append("fsync-directory")
+            return real_fsync(descriptor)
+
+        def record_link(source, target, **kwargs):
+            events.append("link")
+            return real_link(source, target, **kwargs)
+
+        def record_unlink(path, **kwargs):
+            events.append("unlink")
+            return real_unlink(path, **kwargs)
+
+        with records.open_root_directory(self.root) as root_fd:
+            with mock.patch.object(records.os, "fsync", side_effect=record_fsync), \
+                    mock.patch.object(records.os, "link", side_effect=record_link), \
+                    mock.patch.object(records.os, "unlink", side_effect=record_unlink):
+                records.write_change(root_fd, self.root, change)
+
+        self.assertEqual(
+            [event for event in events if event in {"link", "unlink", "fsync-directory"}],
+            ["fsync-directory", "link", "fsync-directory", "unlink", "fsync-directory"],
+        )
+
+    def test_replace_syncs_the_parent_directory_after_publish(self):
+        agents = self.root / "AGENTS.md"
+        agents.write_text("Existing rules\n")
+        change = self.plan().changes[1]
+        events = []
+        real_fsync, real_rename = os.fsync, os.rename
+
+        def record_fsync(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                events.append("fsync-directory")
+            return real_fsync(descriptor)
+
+        def record_rename(source, target, **kwargs):
+            events.append("rename")
+            return real_rename(source, target, **kwargs)
+
+        with records.open_root_directory(self.root) as root_fd:
+            with mock.patch.object(records.os, "fsync", side_effect=record_fsync), \
+                    mock.patch.object(records.os, "rename", side_effect=record_rename):
+                records.write_change(root_fd, self.root, change)
+
+        self.assertEqual(events, ["rename", "fsync-directory"])
+
+    def test_kernel_lock_has_no_release_path_and_blocks_two_followers(self):
+        with records.open_root_directory(self.root) as first_fd:
+            with records.exclusive_apply(first_fd, self.root):
+                self.assertEqual(list(self.root.iterdir()), [])
+                for follower in ("second", "third"):
+                    with self.subTest(follower=follower):
+                        with records.open_root_directory(self.root) as follower_fd:
+                            with self.assertRaisesRegex(records.RecordError, "Another apply"):
+                                with records.exclusive_apply(follower_fd, self.root):
+                                    self.fail("follower entered while the first writer held the lock")
+            with records.open_root_directory(self.root) as successor_fd:
+                with records.exclusive_apply(successor_fd, self.root):
+                    self.assertEqual(list(self.root.iterdir()), [])
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_parent_replacement_cannot_redirect_temporary_write(self):
+        change = self.plan().changes[0]
+        outside = self.root / "outside"
+        outside.mkdir()
+        original_parent = self.root / "docs-original"
+        original_write = records.write_temporary
+
+        def replace_parent(parent_fd, path, content, mode):
+            temporary = original_write(parent_fd, path, content, mode)
+            path.parent.rename(original_parent)
+            path.parent.symlink_to(outside, target_is_directory=True)
+            return temporary
+
+        with records.open_root_directory(self.root) as root_fd:
+            with mock.patch.object(records, "write_temporary", side_effect=replace_parent):
+                with self.assertRaisesRegex(records.RecordError, "Output parent changed"):
+                    records.write_change(root_fd, self.root, change)
+
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(list(original_parent.iterdir()), [])
+
+    def test_apply_refuses_when_directory_relative_writes_are_unavailable(self):
+        plan = self.plan()
+        with mock.patch.object(records, "ANCHORED_WRITES_SUPPORTED", False):
+            with self.assertRaisesRegex(records.RecordError, "preview remains available"):
+                records.apply_plan(plan)
+        self.assertEqual(list(self.root.iterdir()), [])
 
     def test_cli_preview_and_apply(self):
         args = ["--root", str(self.root), "--language", "zh-CN", "--level", "prototype", "--goal", "本地任务"]

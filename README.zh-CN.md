@@ -74,7 +74,38 @@ ln -s "$PWD" ~/.agents/skills/codex-commander
 如果技能没有出现，刷新技能列表或重启客户端。
 
 使用本技能本身不需要额外的 API Key、安装依赖包或安装上游 `grill-me`。
-可选的项目记录辅助脚本和自动化测试需要 Python 3.10 或更高版本。
+可选的项目记录辅助脚本和自动化测试支持 Python 3.10–3.13。
+
+## Python 兼容性、本地升级与维护
+
+本技能除标准库外没有运行时依赖。为避免把配置文件误当作已完成的托管运行，文档会明确
+区分声明的支持基线、已配置的 CI 目标和本机证据：
+
+| Python | 声明的支持 | 已配置的 CI 目标 | 当前本机证据 |
+| --- | --- | --- | --- |
+| 3.10 | 最低支持版本。 | Ubuntu 与 macOS。 | 本工作树尚未记录。 |
+| 3.11 | 属于当前支持范围。 | 当前不是 CI 目标。 | macOS 上 61 项测试与包检查通过。 |
+| 3.12 | 属于当前支持范围。 | Ubuntu 与 macOS。 | macOS 上 61 项测试与包检查通过。 |
+| 3.13 | 属于当前支持范围。 | Ubuntu 与 macOS。 | 本工作树尚未记录。 |
+| 后续小版本 | 未审阅前不声明支持。 | 未明确加入前不配置。 | 无。 |
+
+仓库中的 GitHub Actions 工作流已为表中的 CI 目标配置，但此处不宣称它已经在 GitHub
+托管环境运行。配置矩阵不是运行证据；确切本机命令和历史结果见
+[VALIDATION.md](VALIDATION.md)。
+
+本地复制安装和符号链接安装都采用“先审阅、后变更”的方式，不是自动更新渠道。升级时，
+先检查实际使用的技能目录入口以及它是目录还是链接；在独立位置准备并比较候选源码；
+在那里运行包检查和测试；随后才明确决定是重定向链接，还是替换复制安装的目录。候选版本
+完成审阅和验证前，保留现有副本。不要用递归复制覆盖现有安装，也不要强制替换链接；
+选定变更完成后再刷新客户端。
+
+维护者应同步更新 `VERSION`、支持矩阵和 `VALIDATION.md`。兼容性改变时，测试受影响的
+Python 与操作系统组合，并分别记录本机证据和已经完成的托管 CI。委派或其他行为改变时，
+更新行为用例，并只记录实际取得的运行时证据。这些维护步骤不代表已经发布新版本。
+
+当前源码已准备为 **v0.2.0 发布候选**，但尚未创建 Git Tag，也没有发布托管
+Release。拟用 Tag 与用户可见变更见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，
+候选文件清单及校验值见 [RELEASE_CHECKSUMS.txt](RELEASE_CHECKSUMS.txt)。
 
 ## 使用方法
 
@@ -99,6 +130,23 @@ whether a team is worthwhile. Do not start implementation yet.
 **项目归属、实际工作的目录／worktree、侧边栏分区**是不同的事情。
 “创建侧边栏代理团队”不等于“创建新分区”。如果你明确要求自定义分区，
 可以在保持正确项目绑定的前提下使用；技能不会自行调整已有项目的置顶或分区。
+
+## 与上游 `grill-me` 和 `grilling` 的关系
+
+下列名称只描述各自仓库中的机制，并不是跨项目通用的官方标准。在本项目审阅的上游
+提交中，[`grill-me`](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/productivity/grill-me/SKILL.md)
+会转交给
+[`grilling`](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/productivity/grilling/SKILL.md)。
+Codex Commander 无需安装上游技能，并对其追问思路作了以下独立改编：
+
+| 主题 | 审阅版本中的上游机制 | Codex Commander 的机制 |
+| --- | --- | --- |
+| Frontier 与停止条件 | `grilling` 用 design tree（设计树）组织决策。**Frontier** 是前置条件均已确定的全部决策；遍历所有分支、frontier 为空时结束。 | Codex Commander 不要求显式建立设计树，也不要求穷尽 frontier。当当前目标、边界、重大风险和验收条件已足以支持下一步获授权工作时即可停止；用户也可以提前叫停，此时需披露未决风险。 |
+| 提问节奏 | `grilling` 在一轮中提出当前整个 frontier 的编号问题，等待回答后再重新计算 frontier。 | Codex Commander 先问一个会影响交付的重要问题；只有相互独立且合并后仍容易回答时才成组提问。小而明确的改动可以不再追加问题。 |
+| `Prototype` | 上游另有 [`prototype` 技能](https://github.com/mattpocock/skills/blob/6654f6b60cd9d5be8b54c6fafe44346dabeb3b76/skills/engineering/prototype/SKILL.md)，用这个词表示为回答设计问题而编写的可丢弃代码。 | **Prototype（轻量验证）**是本项目自己的交付深度标签：在适当保护措施下验证一条完整而狭窄的路径。它不表示代码必须丢弃，也与团队人数无关。 |
+
+这些是范围和工作流机制的差异，不表示任何一方必然更快、能力更强或普遍更好。
+审阅的上游版本与致谢信息见 [NOTICE.md](NOTICE.md)。
 
 ## 兼容性与限制
 
