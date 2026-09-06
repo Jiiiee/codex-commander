@@ -51,13 +51,19 @@ MAX_WRAPPER_CONTEXT_CHARACTERS = 4096
 MAX_WRAPPER_DEPTH = 32
 CONTEXT_LIMIT = "<wrapper-context-limit>"
 MAX_RESIDUAL_TOKEN_CHARACTERS = 64
+MAX_RESIDUAL_SEPARATOR_CHARACTERS = MAX_RESIDUAL_TOKEN_CHARACTERS
 MAX_HTML_ENTITY_LAYERS = 3
 MAX_UTF8_BYTES_PER_CHARACTER = 4
 PERCENT_ESCAPE_EXPANSION = 3
-# 源窗口覆盖三层 HTML 前缀、64 字符 token 和赋值符；每个字符再按
-# 四字节 UTF-8 与三层 ``%XX`` 的最坏膨胀计算，不能使用经验常量。
+# 源窗口覆盖三层 HTML 前缀、separator 前后各一个 64 字符 token、
+# 最多 64 字符的连续 separator 和赋值符；每个字符再按四字节 UTF-8
+# 与三层 ``%XX`` 的最坏膨胀计算，不能使用经验常量。
 MAX_RESIDUAL_DECODED_CHARACTERS = (
-    1 + 4 * MAX_HTML_ENTITY_LAYERS + MAX_RESIDUAL_TOKEN_CHARACTERS + 1
+    1
+    + 4 * MAX_HTML_ENTITY_LAYERS
+    + 2 * MAX_RESIDUAL_TOKEN_CHARACTERS
+    + MAX_RESIDUAL_SEPARATOR_CHARACTERS
+    + 1
 )
 MAX_RESIDUAL_SOURCE_CHARACTERS = (
     MAX_RESIDUAL_DECODED_CHARACTERS
@@ -183,6 +189,8 @@ def _decoded_html_prefix(value):
 def _decoded_boundary_kind(value, allow_token):
     """用固定上界识别已解码的 wrapper 残余结构。"""
     index = 0
+    separator_characters = 0
+    separator_started = False
     if value.startswith("&"):
         index, exhausted = _decoded_html_prefix(value)
         if exhausted:
@@ -194,21 +202,29 @@ def _decoded_boundary_kind(value, allow_token):
             return True, False
         if not allow_token:
             return False, False
+        separator_characters = index
+        separator_started = True
     elif not allow_token:
         return False, False
 
     token_length = 0
-    separator_consumed = False
     while index < len(value):
         character = value[index]
         if character == "=":
             return token_length > 0, False
-        separator_end = _ambiguous_residual_separator_end(value, index)
+        separator_end, separator_exhausted = _ambiguous_residual_separator_end(
+            value, index
+        )
+        if separator_exhausted:
+            return False, True
         if separator_end is not None:
-            if not allow_token or separator_consumed:
+            if not allow_token or (separator_started and token_length):
                 return False, False
-            separator_consumed = True
+            separator_started = True
             token_length = 0
+            separator_characters += separator_end - index
+            if separator_characters > MAX_RESIDUAL_SEPARATOR_CHARACTERS:
+                return False, True
             index = separator_end
             continue
         if (
@@ -224,24 +240,35 @@ def _decoded_boundary_kind(value, allow_token):
 
 
 def _ambiguous_residual_separator_end(value, index):
-    """Return the end of one raw/HTML document separator, with fixed work."""
+    """Return one raw/HTML separator end and whether its bound was exhausted."""
     character = value[index]
     if character not in AMBIGUOUS_RESIDUAL_SEPARATOR_CHARACTERS:
-        return None
+        return None, False
     if character != "&":
-        return index + 1
+        return index + 1, False
 
-    # Treat a bounded named or numeric HTML entity as one separator token.  A
-    # bare ampersand remains a one-character separator.
+    # Repeated ``amp;`` layers are one encoded separator.  This mirrors the
+    # prefix decoder at arbitrary positions without allocating a suffix.
     entity_end = index + 1
+    layers = 0
+    while _ascii_case_insensitive_startswith(value, entity_end, "amp;"):
+        if layers == MAX_HTML_ENTITY_LAYERS:
+            return entity_end, True
+        entity_end += 4
+        layers += 1
+    if layers:
+        return entity_end, False
+
+    # Treat another bounded named or numeric HTML entity as one separator token.
+    # A bare ampersand remains a one-character separator.
     while entity_end < len(value) and entity_end - index <= MAX_RESIDUAL_TOKEN_CHARACTERS:
         character = value[entity_end]
         if character == ";":
-            return entity_end + 1
+            return entity_end + 1, False
         if not (character.isalnum() or character == "#"):
             break
         entity_end += 1
-    return index + 1
+    return index + 1, False
 
 
 def _bounded_boundary_probe(candidate, start, allow_token):
@@ -264,7 +291,7 @@ def _bounded_boundary_probe(candidate, start, allow_token):
 
 
 def _raw_residual_boundary(candidate, start):
-    """线性扫描 raw 短 token 和单个结构分隔符；percent 交给 probe。"""
+    """线性扫描 raw 短 token 和连续结构分隔符；percent 交给 probe。"""
     if start >= len(candidate):
         return False, False, False
     if candidate[start] == "%":
@@ -272,19 +299,27 @@ def _raw_residual_boundary(candidate, start):
 
     index = start
     token_length = 0
-    separator_consumed = False
+    separator_characters = 0
+    separator_started = False
     while index < len(candidate):
         character = candidate[index]
         if character == "=":
             return token_length > 0, False, False
         if character == "%":
             return False, True, False
-        separator_end = _ambiguous_residual_separator_end(candidate, index)
+        separator_end, separator_exhausted = _ambiguous_residual_separator_end(
+            candidate, index
+        )
+        if separator_exhausted:
+            return False, False, True
         if separator_end is not None:
-            if separator_consumed:
+            if separator_started and token_length:
                 return False, False, False
-            separator_consumed = True
+            separator_started = True
             token_length = 0
+            separator_characters += separator_end - index
+            if separator_characters > MAX_RESIDUAL_SEPARATOR_CHARACTERS:
+                return False, False, True
             index = separator_end
             continue
         if (
