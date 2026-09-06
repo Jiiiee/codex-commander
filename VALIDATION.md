@@ -103,8 +103,8 @@ checksum manifest before the final gate is repeated.
 
 | Check | Observed result |
 | --- | --- |
-| `python3.11 -B -m unittest discover -s tests -v` | 122 tests passed. |
-| `python3.12 -B -m unittest discover -s tests -v` | 122 tests passed. |
+| `python3.11 -B -m unittest discover -s tests -v` | 135 tests passed. |
+| `python3.12 -B -m unittest discover -s tests -v` | 135 tests passed. |
 | `python3.11 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | `python3.12 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
@@ -123,6 +123,14 @@ explicit Markdown link or autolink form. Residual scanning applies separate
 64-character bounds to token and separator characters and a source window
 derived from the three-layer percent-decoding limit; truncation, incomplete
 tokens, invalid escapes, and exhausted decode depth also fail closed.
+
+The final scanner gate additionally covers repeated and alternating wrapper
+closers, wrapper openers, paired punctuation, braces, and bounded HTML entities
+as grammar-derived document evidence in both raw and percent-decoded residuals.
+An independent stage matrix exercised 7,068 reject cases across 19 wrappers and
+32 document markers with no fail-open, while nine explicit-link and benign URI
+token controls produced no false positive. Focused maximum/overflow and linear
+work assertions also passed.
 
 ## Version 0.1.3: bilingual publication preparation
 
