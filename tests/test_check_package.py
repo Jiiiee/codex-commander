@@ -307,6 +307,140 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_wrapped_url_suffixes_use_bounded_percent_decoding(self):
+        examples = (
+            "[docs](https://example.test/guide)/%" + "2FUsers%2Falice%2Fprivate",
+            "See (https://example.test/guide)/%" + "252Froot%252Fprivate",
+            r"[docs](https://example.test/guide)C%" + r"3A%5CUsers%5Calice%5Cprivate",
+            r"See (https://example.test/guide)C%" + r"253A%255CUsers%255Calice%255Cprivate",
+            "[docs](https://example.test/guide)/%" + "2525252Fopt%2525252Fvendor",
+            "See (https://example.test/guide)/%ZZ/%" + "2Fhome%2Falice%2Fprivate",
+            "[docs](https://example.test/Users/alice/network-guide)" + "%" + "ZZ",
+            "* https://example.test/root/network-guide */" + "%" + "2",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_common_document_wrappers_cannot_absorb_adjacent_machine_paths(self):
+        examples = (
+            "'https://example.test/guide'/" + "Users/alice/private",
+            '"https://example.test/guide"/%' + "2Froot%2Fprivate",
+            "‘https://example.test/guide’/%" + "252Fopt%252Fvendor",
+            "“https://example.test/guide”/" + "home/alice/private",
+            "*https://example.test/guide*/" + "Users/alice/private",
+            "**https://example.test/guide**/%" + "2Froot%2Fprivate",
+            "_https://example.test/guide_/" + "opt/vendor/tool",
+            "__https://example.test/guide__/%" + "252Fhome%252Falice",
+            "`https://example.test/guide`C%" + r"3A%5CUsers%5Calice%5Cprivate",
+            "(https://example.test/guide)/%" + "2FUsers%2Falice%2Fprivate",
+            "[https://example.test/guide]/" + "root/private",
+            "**“'[https://example.test/(stable)]'”**/%" + "2Fopt%2Fvendor%2Ftool",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_rfc_subdelimiters_and_document_wrappers_remain_valid_in_urls(self):
+        examples = (
+            "https://o'reilly@example.test/Users/alice/guide",
+            "https://user!$&'()*+,;=:pass@example.test/root/guide",
+            "https://example.test/release's/Users/alice/guide",
+            "https://example.test/release*notes/opt/tool",
+            "https://example.test/release_notes/home/alice/guide",
+            "https://example.test/guide?edition=o'reilly&mark=*#part_*",
+            "'https://example.test/release's/Users/alice/guide'",
+            "*https://example.test/release*notes/opt/tool*",
+            "__https://example.test/release_notes/home/alice/guide__",
+            "“https://[2001:db8::1]:8443/(stable)/Users/alice/guide”",
+            "**“'[https://example.test/(stable)/root/guide]'”**",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
+    def test_spaced_nested_wrappers_and_multiple_urls_keep_suffixes_visible(self):
+        examples = (
+            "See ** https://example.test/guide **/%" + "2FUsers%2Falice%2Fprivate",
+            "‘ https://[2001:db8::1]:8443/guide ’/%" + "252Froot%252Fprivate",
+            "( ' [ https://example.test/guide?next=public#part ] ' )C%"
+            + r"3A%5CUsers%5Calice%5Cprivate",
+            "https://example.test/root/network-guide and "
+            "__ https://example.test/guide __/%" + "2Fopt%2Fvendor%2Ftool",
+            "* https://[2001:db8::1]/guide?next=public#part */%ZZ/%"
+            + "2Fhome%2Falice%2Fprivate",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_spaced_document_wrappers_allow_network_paths_and_rfc_subdelimiters(self):
+        examples = (
+            "See ** https://example.test/release*notes/Users/alice/guide **.",
+            "‘ https://[2001:db8::1]:8443/root/network-guide ’",
+            "( ' [ https://o'reilly@example.test/(stable)/opt/tool ] ' )",
+            "https://example.test/Users/alice/guide and "
+            "__ https://example.test/release_notes/home/alice/guide __",
+            "* https://example.test/release*notes/opt/tool * "
+            "https://example.test/Users/alice/guide",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
+    def test_markdown_prefixes_do_not_weaken_scheme_start_boundaries(self):
+        examples = (
+            "token__https://example.test/" + "Users/alice/private__",
+            "word*https://example.test/" + "root/private*",
+            "name_https://example.test/%" + "2Fopt%2Fvendor",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_wrapper_context_limits_fail_closed_with_bounded_work(self):
+        class CountedString(str):
+            def __new__(cls, value, counts=None):
+                instance = super().__new__(cls, value)
+                instance.counts = counts if counts is not None else {"index": 0}
+                return instance
+
+            def __getitem__(self, key):
+                self.counts["index"] += 1
+                value = super().__getitem__(key)
+                if isinstance(key, slice):
+                    return type(self)(value, self.counts)
+                return value
+
+        content = CountedString(
+            "(" + " " * (checker.MAX_WRAPPER_CONTEXT_CHARACTERS + 512)
+            + "https://example.test/Users/alice/guide"
+        )
+        start = content.index("https://")
+        self.assertEqual(checker._url_wrapper_openers(content, start), (checker.CONTEXT_LIMIT,))
+        self.assertLessEqual(
+            content.counts["index"], checker.MAX_WRAPPER_CONTEXT_CHARACTERS + 2
+        )
+        self.assertTrue(checker.contains_machine_specific_path(content))
+
+        overlong_tail = (
+            "* https://example.test/Users/alice/guide"
+            + " " * (checker.MAX_WRAPPER_CONTEXT_CHARACTERS + 512)
+            + "*/public"
+        )
+        self.assertTrue(checker.contains_machine_specific_path(overlong_tail))
+
+        def tail_work(spaces):
+            tail_content = CountedString(" " * spaces + "*/%2FUsers%2Falice")
+            suffix, exhausted = checker._bounded_wrapper_tail(tail_content, 0, ("*",))
+            self.assertFalse(exhausted)
+            self.assertEqual(suffix, " " * spaces + "*/%2FUsers%2Falice")
+            return tail_content.counts["index"]
+
+        small_work = tail_work(512)
+        large_work = tail_work(1024)
+        self.assertLessEqual(large_work, small_work * 2 + 8)
+
     def test_nested_percent_encoding_cannot_hide_machine_paths_in_url_parameters(self):
         examples = (
             "https://example.test/upload?source=%" + "252FUsers%252Falice%252Fprivate.txt",

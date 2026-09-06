@@ -32,7 +32,7 @@ MACHINE_SPECIFIC_PATHS = (
     re.compile(r"[A-Za-z]:[\\\\/](?:Users|ProgramData|home)[\\\\/][^\s`'\"<>()\[\]]+"),
     re.compile(r"\\\\[^\\\\/\s]+\\(?:Users|ProgramData|home)\\[^\s`'\"<>()\[\]]+"),
 )
-URL = re.compile(r"https?://(?:(?!https?://)[^\s`\"<>])+", re.I)
+URL = re.compile(r"https?://(?:(?!https?://)[^\s<>])+", re.I)
 URL_TRAILING_PUNCTUATION = ".,;:!?"
 MAX_PERCENT_DECODE_LAYERS = 3
 HOSTNAME = re.compile(
@@ -41,12 +41,32 @@ HOSTNAME = re.compile(
 )
 USERINFO = re.compile(r"(?:[A-Za-z0-9._~!$&'()*+,;=:]|%[0-9A-Fa-f]{2})+")
 INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
-AMBIGUOUS_URL_PREFIX_CHARACTERS = frozenset("_+-.%:/\\@")
+AMBIGUOUS_URL_PREFIX_CHARACTERS = frozenset("_*'+-.%:/\\@")
+MAX_WRAPPER_CONTEXT_CHARACTERS = 4096
+MAX_WRAPPER_DEPTH = 32
+CONTEXT_LIMIT = "<wrapper-context-limit>"
+WRAPPER_CLOSERS = {
+    "(": ")",
+    "[": "]",
+    "'": "'",
+    '"': '"',
+    "‘": "’",
+    "“": "”",
+    "*": "*",
+    "**": "**",
+    "_": "_",
+    "__": "__",
+    "`": "`",
+}
+SYMMETRIC_WRAPPERS = frozenset(("'", '"', "‘", "“", "*", "**", "_", "__", "`"))
+NON_URI_DOCUMENT_DELIMITERS = frozenset(('"', "`", "‘", "’", "“", "”"))
 
 
-def _has_http_scheme_start_boundary(content, start):
+def _has_http_scheme_start_boundary(content, start, wrapper_openers=()):
     """Reject a scheme match embedded in an identifier or URI-like prefix."""
     if start == 0:
+        return True
+    if wrapper_openers:
         return True
     previous = content[start - 1]
     return not (
@@ -56,28 +76,124 @@ def _has_http_scheme_start_boundary(content, start):
 
 
 def _url_wrapper_openers(content, start):
-    """Return adjacent outer openers with a single scan bounded by ``start``."""
+    """Return adjacent document openers using bounded, longest-token scanning."""
     openers = []
     index = start
-    while index:
+    scanned = 0
+    while index and scanned < MAX_WRAPPER_CONTEXT_CHARACTERS:
         character = content[index - 1]
         if character.isspace():
             index -= 1
+            scanned += 1
             continue
-        if character in "([":
-            openers.append(character)
-            index -= 1
-            continue
-        break
+        opener = None
+        for width in (2, 1):
+            token_start = index - width
+            if token_start < 0:
+                continue
+            token = content[token_start:index]
+            if token in WRAPPER_CLOSERS:
+                opener = token
+                break
+        if opener is None or len(openers) == MAX_WRAPPER_DEPTH:
+            break
+        token_start = index - len(opener)
+        if opener in SYMMETRIC_WRAPPERS and token_start and content[token_start - 1].isalnum():
+            break
+        openers.append(opener)
+        scanned += len(opener)
+        index = token_start
+    if index and (
+        scanned >= MAX_WRAPPER_CONTEXT_CHARACTERS or len(openers) == MAX_WRAPPER_DEPTH
+    ):
+        return (CONTEXT_LIMIT,)
     return tuple(openers)
+
+
+def _is_wrapper_closer_boundary(candidate, end, outer_openers):
+    """Distinguish document closers from legal URI sub-delimiters."""
+    if end == len(candidate):
+        return True
+    remainder = candidate[end:]
+    if remainder[0].isspace() or remainder[0] in URL_TRAILING_PUNCTUATION + "/\\%":
+        return True
+    if any(remainder.startswith(WRAPPER_CLOSERS[opener]) for opener in outer_openers):
+        return True
+    return re.match(r"[A-Za-z](?::|%[0-9A-Fa-f]{2})", remainder) is not None
+
+
+def _remaining_wrapper_openers(suffix, wrapper_openers):
+    """Account for wrapper closers already captured in a URL candidate suffix."""
+    index = 0
+    for position, opener in enumerate(wrapper_openers):
+        closer = WRAPPER_CLOSERS[opener]
+        while index < len(suffix) and suffix[index].isspace():
+            index += 1
+        if not suffix.startswith(closer, index):
+            return wrapper_openers[position:]
+        index += len(closer)
+    return ()
+
+
+def _bounded_wrapper_tail(content, start, wrapper_openers):
+    """Capture spaced outer closers and their adjacent token with fixed work."""
+    if not wrapper_openers:
+        return "", False
+    index = start
+    scanned = 0
+
+    def skip_space():
+        nonlocal index, scanned
+        while (
+            index < len(content)
+            and scanned < MAX_WRAPPER_CONTEXT_CHARACTERS
+            and content[index].isspace()
+        ):
+            index += 1
+            scanned += 1
+
+    consumed_closer = False
+    for opener in wrapper_openers:
+        skip_space()
+        if scanned == MAX_WRAPPER_CONTEXT_CHARACTERS and index < len(content):
+            return content[start:index], True
+        closer = WRAPPER_CLOSERS[opener]
+        if not content.startswith(closer, index):
+            return "", False
+        if scanned + len(closer) > MAX_WRAPPER_CONTEXT_CHARACTERS:
+            return content[start:index], True
+        index += len(closer)
+        scanned += len(closer)
+        consumed_closer = True
+
+    skip_space()
+    token_start = index
+    while (
+        index < len(content)
+        and scanned < MAX_WRAPPER_CONTEXT_CHARACTERS
+        and not content[index].isspace()
+    ):
+        index += 1
+        scanned += 1
+    exhausted = scanned == MAX_WRAPPER_CONTEXT_CHARACTERS and index < len(content)
+    token = content[token_start:index]
+    next_url = URL.search(token)
+    if next_url:
+        next_openers = _url_wrapper_openers(token, next_url.start())
+        if CONTEXT_LIMIT not in next_openers and _has_http_scheme_start_boundary(
+            token, next_url.start(), next_openers
+        ):
+            index = token_start
+    return (content[start:index] if consumed_closer else ""), exhausted
 
 
 def _split_url_candidate(candidate, leading_delimiters=()):
     """Separate sentence/Markdown closers without imposing URI path balance."""
     if isinstance(leading_delimiters, str):
-        wrapper_openers = frozenset((leading_delimiters,))
+        wrapper_openers = (leading_delimiters,)
     else:
-        wrapper_openers = frozenset(leading_delimiters)
+        wrapper_openers = tuple(leading_delimiters)
+    expected_closer = WRAPPER_CLOSERS.get(wrapper_openers[0]) if wrapper_openers else None
     opener_counts = {"(": 0, "[": 0}
     closer_counts = {")": 0, "]": 0}
     matching_opener = {")": "(", "]": "["}
@@ -89,13 +205,26 @@ def _split_url_candidate(candidate, leading_delimiters=()):
     end = len(candidate)
     for index in range(end):
         character = candidate[index]
+        if character in NON_URI_DOCUMENT_DELIMITERS:
+            end = index
+            break
+        if (
+            wrapper_openers
+            and wrapper_openers[0] in SYMMETRIC_WRAPPERS
+            and candidate.startswith(expected_closer, index)
+            and _is_wrapper_closer_boundary(
+                candidate, index + len(expected_closer), wrapper_openers[1:]
+            )
+        ):
+            end = index
+            break
         if character in opener_counts:
             opener_counts[character] += 1
         elif character in closer_counts:
             opener = matching_opener[character]
             if opener_counts[opener] > closer_counts[character]:
                 closer_counts[character] += 1
-            elif opener in wrapper_openers:
+            elif expected_closer == character:
                 end = index
                 break
             else:
@@ -184,15 +313,18 @@ def contains_machine_specific_path(content):
         return "\n".join(layers)
 
     def replace_url(match):
+        nonlocal decode_limit_exhausted
         candidate = match.group()
-        if not _has_http_scheme_start_boundary(match.string, match.start()):
-            return scan_payload(candidate)
         wrapper_openers = _url_wrapper_openers(match.string, match.start())
+        if CONTEXT_LIMIT in wrapper_openers:
+            return scan_payload(candidate)
+        if not _has_http_scheme_start_boundary(match.string, match.start(), wrapper_openers):
+            return scan_payload(candidate)
         split_candidate = _split_url_candidate(candidate, wrapper_openers)
         if split_candidate is None:
             return scan_payload(candidate)
         url, suffix = split_candidate
-        if INVALID_PERCENT_ESCAPE.search(url):
+        if INVALID_PERCENT_ESCAPE.search(url) or INVALID_PERCENT_ESCAPE.search(suffix):
             return scan_payload(candidate)
         try:
             parsed = urlsplit(url)
@@ -208,8 +340,22 @@ def contains_machine_specific_path(content):
         # A URL path names a network resource, whereas query and fragment values
         # commonly carry local filenames.  Scan both their literal and decoded
         # forms so percent-encoding cannot bypass the package check.
-        parameters = "\n".join((scan_payload(parsed.query), scan_payload(parsed.fragment)))
-        return parameters + suffix
+        remaining_openers = _remaining_wrapper_openers(suffix, wrapper_openers)
+        wrapper_tail, wrapper_limit_exhausted = _bounded_wrapper_tail(
+            match.string, match.end(), remaining_openers
+        )
+        if wrapper_limit_exhausted:
+            decode_limit_exhausted = True
+        if INVALID_PERCENT_ESCAPE.search(wrapper_tail):
+            return scan_payload(candidate + "\n" + wrapper_tail)
+        return "\n".join(
+            (
+                scan_payload(parsed.query),
+                scan_payload(parsed.fragment),
+                scan_payload(suffix),
+                scan_payload(wrapper_tail),
+            )
+        )
 
     without_urls = URL.sub(replace_url, content)
     return decode_limit_exhausted or any(
