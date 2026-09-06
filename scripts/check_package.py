@@ -214,6 +214,8 @@ def _decoded_boundary_kind(
     has_restarted = False
     while index < len(value):
         if restart_closer and value.startswith(restart_closer, index):
+            if has_restarted:
+                return True, False
             index += len(restart_closer)
             separator_characters = 0
             token_length = 0
@@ -329,6 +331,8 @@ def _raw_residual_boundary(
     has_restarted = False
     while index < len(candidate):
         if restart_closer and candidate.startswith(restart_closer, index):
+            if has_restarted:
+                return True, False, False
             index += len(restart_closer)
             separator_characters = 0
             token_length = 0

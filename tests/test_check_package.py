@@ -585,6 +585,88 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_repeated_matching_wrapper_closers_cannot_reset_residual_budget(self):
+        examples = (
+            "~~https://example.test/guide~~foo~~bar%3Fbaz/"
+            + "opt/vendor/tool~~",
+            "*https://example.test/guide*foo*bar%3Fbaz/"
+            + "opt/vendor/tool*",
+            "**https://example.test/guide**foo**bar%3Fbaz/"
+            + "opt/vendor/tool**",
+            "_https://example.test/guide_foo_bar%3Fbaz/"
+            + "opt/vendor/tool_",
+            "__https://example.test/guide__foo__bar%3Fbaz/"
+            + "opt/vendor/tool__",
+            "（~~https://example.test/guide~~foo~~bar%3Fbaz/"
+            + "opt/vendor/tool~~）",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_repeated_closer_matrix_covers_raw_encoded_and_mixed_uri_stops(self):
+        def encode_every_byte(value):
+            return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))
+
+        symmetric_wrappers = (
+            ("'", "'"),
+            ("*", "*"),
+            ("**", "**"),
+            ("_", "_"),
+            ("__", "__"),
+            ("~~", "~~"),
+        )
+        for opener, closer in symmetric_wrappers:
+            raw = "foo" + closer + "bar?baz/" + "opt/vendor/tool" + closer
+            encoded = (
+                "foo"
+                + encode_every_byte(closer)
+                + "bar%3Fbaz%2F"
+                + "opt%2Fvendor%2Ftool"
+                + encode_every_byte(closer)
+            )
+            html_mixed = (
+                "foo"
+                + closer
+                + "bar&amp;qux%3Fbaz/"
+                + "opt/vendor/tool"
+                + closer
+            )
+            for encoding, residual in (
+                ("raw", raw),
+                ("encoded", encoded),
+                ("html-mixed", html_mixed),
+            ):
+                example = opener + "https://example.test/guide" + closer + residual
+                with self.subTest(wrapper=opener, encoding=encoding):
+                    self.assertTrue(checker.contains_machine_specific_path(example))
+
+        outer_wrappers = (("(", ")"), ("（", "）"), ("「", "」"), ("【", "】"))
+        for outer_opener, outer_closer in outer_wrappers:
+            example = (
+                outer_opener
+                + "~~https://example.test/guide~~foo~~bar%3Fbaz/"
+                + "opt/vendor/tool~~"
+                + outer_closer
+            )
+            with self.subTest(outer=outer_opener):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_single_internal_closer_and_explicit_url_controls_remain_valid(self):
+        examples = (
+            "'https://example.test/release'notes/" + "opt/tool'",
+            "*https://example.test/release*notes/" + "opt/tool*",
+            "**https://example.test/release**notes/" + "opt/tool**",
+            "_https://example.test/release_notes/" + "opt/tool_",
+            "__https://example.test/release__notes/" + "opt/tool__",
+            "~~https://example.test/release~~notes/" + "Users/alice/guide~~",
+            "[guide](https://example.test/release*notes/" + "opt/tool)",
+            "<https://example.test/release*notes/" + "opt/tool>",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
     def test_uri_component_stop_residuals_cross_raw_encoded_and_token_matrix(self):
         def encode_every_byte(value):
             return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))
@@ -642,6 +724,47 @@ class CheckPackageTests(unittest.TestCase):
         for example in rejected:
             with self.subTest(example=example[:120]):
                 self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_repeated_closer_phase_preserves_raw_and_decoded_residual_limits(self):
+        def encode_every_byte(value):
+            return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))
+
+        maximum = "x" * checker.MAX_RESIDUAL_TOKEN_CHARACTERS + "~~"
+        overflow = "x" + maximum
+        self.assertEqual(
+            checker._raw_residual_boundary(maximum, 0, restart_closer="~~"),
+            (False, False, False),
+        )
+        self.assertEqual(
+            checker._raw_residual_boundary(overflow, 0, restart_closer="~~"),
+            (False, False, True),
+        )
+        self.assertEqual(
+            checker._bounded_boundary_probe(
+                encode_every_byte(maximum),
+                0,
+                allow_token=True,
+                restart_closer="~~",
+            ),
+            (False, False),
+        )
+        self.assertEqual(
+            checker._bounded_boundary_probe(
+                encode_every_byte(overflow),
+                0,
+                allow_token=True,
+                restart_closer="~~",
+            ),
+            (False, True),
+        )
+
+        prefix = "~~https://example.test/guide~~"
+        for residual in (maximum, overflow):
+            repeated = residual + "bar%3Fbaz/" + "opt/vendor/tool~~"
+            with self.subTest(length=len(residual)):
+                self.assertTrue(
+                    checker.contains_machine_specific_path(prefix + repeated)
+                )
 
     def test_uri_component_stop_residual_rule_preserves_explicit_url_forms(self):
         examples = (
@@ -941,30 +1064,35 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=repr(example)):
                 self.assertFalse(checker.contains_machine_specific_path(example))
 
-    def test_symmetric_wrapper_closer_scan_has_linear_slice_work(self):
+    def test_repeated_symmetric_wrapper_closer_scan_has_linear_work(self):
         class CountedString(str):
             def __new__(cls, value, counts=None):
                 instance = super().__new__(cls, value)
-                instance.counts = counts if counts is not None else {"slice_work": 0}
+                instance.counts = counts if counts is not None else {"work": 0}
                 return instance
 
             def __getitem__(self, key):
                 value = super().__getitem__(key)
                 if isinstance(key, slice):
-                    self.counts["slice_work"] += len(value)
+                    self.counts["work"] += len(value)
                     return type(self)(value, self.counts)
+                self.counts["work"] += 1
                 return value
 
         def closer_work(segments):
-            candidate = CountedString("https://example.test/" + "segment*" * segments)
+            network_path = "https://example.test/" + "segment/" * segments
+            candidate = CountedString(
+                network_path + "*foo*bar%3Fbaz/" + "opt/vendor/tool*"
+            )
             url, suffix = checker._split_url_candidate(candidate, ("*",))
-            self.assertEqual(url, candidate[:-1])
-            self.assertEqual(suffix, "*")
-            return candidate.counts["slice_work"]
+            self.assertEqual(url, network_path)
+            self.assertEqual(suffix, "*foo*bar%3Fbaz/" + "opt/vendor/tool*")
+            return candidate.counts["work"]
 
         small_work = closer_work(256)
         large_work = closer_work(512)
-        self.assertLessEqual(large_work, small_work * 2 + 32)
+        self.assertGreater(small_work, 0)
+        self.assertLessEqual(large_work, small_work * 2 + 64)
 
     def test_wrapper_context_limits_fail_closed_with_bounded_work(self):
         class CountedString(str):
