@@ -51,9 +51,22 @@ MAX_WRAPPER_CONTEXT_CHARACTERS = 4096
 MAX_WRAPPER_DEPTH = 32
 CONTEXT_LIMIT = "<wrapper-context-limit>"
 MAX_RESIDUAL_TOKEN_CHARACTERS = 64
-MAX_RESIDUAL_SOURCE_CHARACTERS = 512
 MAX_HTML_ENTITY_LAYERS = 3
-RESIDUAL_TOKEN_PUNCTUATION = frozenset("_$.-")
+MAX_UTF8_BYTES_PER_CHARACTER = 4
+PERCENT_ESCAPE_EXPANSION = 3
+# 源窗口覆盖三层 HTML 前缀、64 字符 token 和赋值符；每个字符再按
+# 四字节 UTF-8 与三层 ``%XX`` 的最坏膨胀计算，不能使用经验常量。
+MAX_RESIDUAL_DECODED_CHARACTERS = (
+    1 + 4 * MAX_HTML_ENTITY_LAYERS + MAX_RESIDUAL_TOKEN_CHARACTERS + 1
+)
+MAX_RESIDUAL_SOURCE_CHARACTERS = (
+    MAX_RESIDUAL_DECODED_CHARACTERS
+    * MAX_UTF8_BYTES_PER_CHARACTER
+    * PERCENT_ESCAPE_EXPANSION ** MAX_PERCENT_DECODE_LAYERS
+)
+RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS = frozenset(
+    "=%/\\?#&*~'\"`(){}<>（）「」『』【】〈〉《》"
+)
 DRIVE_PREFIX = re.compile(r"[A-Za-z](?::|%[0-9A-Fa-f]{2})")
 WRAPPER_CLOSERS = {
     "(": ")",
@@ -162,7 +175,7 @@ def _decoded_html_prefix(value):
 
 
 def _decoded_boundary_kind(value, allow_token):
-    """Recognize a generic decoded wrapper residual using fixed-size grammar."""
+    """用固定上界识别已解码的 wrapper 残余结构。"""
     index = 0
     if value.startswith("&"):
         index, exhausted = _decoded_html_prefix(value)
@@ -179,22 +192,33 @@ def _decoded_boundary_kind(value, allow_token):
         return False, False
 
     token_length = 0
-    while index < len(value) and (
-        value[index].isalnum() or value[index] in RESIDUAL_TOKEN_PUNCTUATION
-    ):
+    while index < len(value):
+        character = value[index]
+        if character == "=":
+            return token_length > 0, False
+        if (
+            character.isspace()
+            or character in RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS
+        ):
+            return False, False
         if token_length == MAX_RESIDUAL_TOKEN_CHARACTERS:
             return False, True
         index += 1
         token_length += 1
-    return token_length > 0 and index < len(value) and value[index] == "=", False
+    return False, token_length > 0
 
 
 def _bounded_boundary_probe(candidate, start, allow_token):
-    """Decode only a fixed-size original-string window when probing a boundary."""
+    """在推导出的固定源窗口内解码；任何不完整状态均 fail-closed。"""
     source_end = min(len(candidate), start + MAX_RESIDUAL_SOURCE_CHARACTERS)
     source = candidate[start:source_end]
+    source_truncated = source_end < len(candidate)
     layers = _bounded_percent_decodings(source)
-    if _percent_decoding_limit_exhausted(layers):
+    if (
+        source_truncated
+        or _percent_decoding_limit_exhausted(layers)
+        or any(INVALID_PERCENT_ESCAPE.search(layer) for layer in layers)
+    ):
         return False, True
     for layer in layers:
         matched, exhausted = _decoded_boundary_kind(layer, allow_token)
@@ -204,7 +228,7 @@ def _bounded_boundary_probe(candidate, start, allow_token):
 
 
 def _raw_residual_boundary(candidate, start):
-    """Fast-path a raw short token and defer only encoded forms to decoding."""
+    """直接扫描短 token；遇到 percent escape 时交给有界解码。"""
     if start >= len(candidate):
         return False, False, False
     if candidate[start] in "&%":
@@ -212,19 +236,22 @@ def _raw_residual_boundary(candidate, start):
 
     index = start
     token_length = 0
-    while index < len(candidate) and (
-        candidate[index].isalnum()
-        or candidate[index] in RESIDUAL_TOKEN_PUNCTUATION
-    ):
+    while index < len(candidate):
+        character = candidate[index]
+        if character == "=":
+            return token_length > 0, False, False
+        if character == "%":
+            return False, True, False
+        if (
+            character.isspace()
+            or character in RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS
+        ):
+            return False, False, False
         if token_length == MAX_RESIDUAL_TOKEN_CHARACTERS:
             return False, False, True
         index += 1
         token_length += 1
-    if not token_length:
-        return False, False, False
-    if index < len(candidate) and candidate[index] == "=":
-        return True, False, False
-    return False, index < len(candidate) and candidate[index] == "%", False
+    return False, False, token_length > 0
 
 
 def _is_wrapper_closer_boundary(candidate, end, outer_openers):
@@ -489,7 +516,7 @@ def _has_valid_http_authority(parsed):
 
 
 def contains_machine_specific_path(content):
-    """Ignore HTTP(S) network paths while scanning URL parameters for local paths."""
+    """仅豁免无歧义的 HTTP(S) 网络路径；歧义输入按安全优先 fail-closed。"""
     decode_limit_exhausted = False
 
     def scan_payload(value):

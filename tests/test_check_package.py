@@ -544,6 +544,13 @@ class CheckPackageTests(unittest.TestCase):
             "<https://example.test/guide>" + "&AMP;7%3DC%253A%255CUsers%255Calice",
             "「https://example.test/guide」" + "路径%3D%2FUsers%2Falice%2Fprivate",
             "*https://example.test/guide*" + "9$key%25%33%44%252Froot%252Fprivate",
+            "*https://example.test/guide*key+part=/" + "Users/alice/private",
+            "*https://example.test/guide*key" + "%" + "2Bpart" + "%" + "3D"
+            + "%" + "2Froot" + "%" + "2Fprivate",
+            "_https://example.test/guide_scope:id=/" + "opt/vendor/tool",
+            "~~https://example.test/guide~~path" + "%" + "5B0" + "%" + "5D"
+            + "%" + "3D" + "%" + "2Fhome" + "%" + "2Falice"
+            + "%" + "2Fprivate",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -561,6 +568,77 @@ class CheckPackageTests(unittest.TestCase):
         for example in examples:
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_triple_encoded_maximum_token_uses_derived_source_window(self):
+        def encode_every_byte(value):
+            return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))
+
+        residual = "ab" + encode_every_byte(
+            encode_every_byte(
+                encode_every_byte("k" * 62 + "=/" + "Users/alice/private")
+            )
+        )
+        self.assertEqual(len(residual), 2243)
+        self.assertEqual(
+            checker.MAX_RESIDUAL_SOURCE_CHARACTERS,
+            checker.MAX_RESIDUAL_DECODED_CHARACTERS
+            * checker.MAX_UTF8_BYTES_PER_CHARACTER
+            * checker.PERCENT_ESCAPE_EXPANSION
+            ** checker.MAX_PERCENT_DECODE_LAYERS,
+        )
+        self.assertTrue(
+            checker.contains_machine_specific_path(
+                "~~https://example.test/guide~~" + residual
+            )
+        )
+
+        truncated = residual + "x" * checker.MAX_RESIDUAL_SOURCE_CHARACTERS
+        self.assertEqual(
+            checker._bounded_boundary_probe(truncated, 0, allow_token=True),
+            (False, True),
+        )
+        unfinished = encode_every_byte(
+            encode_every_byte(
+                encode_every_byte("k" * checker.MAX_RESIDUAL_TOKEN_CHARACTERS)
+            )
+        )
+        self.assertEqual(
+            checker._bounded_boundary_probe(unfinished, 0, allow_token=True),
+            (False, True),
+        )
+        invalid_escape = "key" + "%" + "ZZ=/" + "Users/alice/private"
+        self.assertEqual(
+            checker._bounded_boundary_probe(invalid_escape, 0, allow_token=True),
+            (False, True),
+        )
+        excess_layer = encode_every_byte(
+            encode_every_byte(
+                encode_every_byte(
+                    encode_every_byte("key=/" + "Users/alice/private")
+                )
+            )
+        )
+        self.assertEqual(
+            checker._bounded_boundary_probe(excess_layer, 0, allow_token=True),
+            (False, True),
+        )
+
+    def test_ambiguous_wrapped_paths_fail_closed_but_explicit_links_are_valid(self):
+        ambiguous = (
+            "*https://example.test/release*1path=/" + "Users/alice/guide*",
+            "_https://example.test/release_scope:id=/" + "opt/vendor/tool_",
+        )
+        explicit = (
+            "[network path](https://example.test/release*1path=/"
+            + "Users/alice/guide*)",
+            "<https://example.test/release*1path=/" + "Users/alice/guide*>",
+        )
+        for example in ambiguous:
+            with self.subTest(kind="ambiguous", example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+        for example in explicit:
+            with self.subTest(kind="explicit", example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
 
     def test_generic_wrapper_residual_rule_preserves_valid_url_forms(self):
         examples = (
