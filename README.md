@@ -91,9 +91,10 @@ configuration file is not mistaken for a completed hosted run:
 
 | Python | Documented support | Configured CI target | Current local evidence |
 | --- | --- | --- | --- |
+| 3.9 | Not supported, even if a local invocation happens to run. | Not targeted. | None. |
 | 3.10 | Minimum supported version. | Ubuntu and macOS. | Not recorded for this working tree. |
-| 3.11 | Included in the supported range. | Not currently a CI target. | 61 tests and the package check passed on macOS. |
-| 3.12 | Included in the supported range. | Ubuntu and macOS. | 61 tests and the package check passed on macOS. |
+| 3.11 | Included in the supported range. | Ubuntu and macOS. | Local evidence is recorded in VALIDATION.md. |
+| 3.12 | Included in the supported range. | Ubuntu and macOS. | Local evidence is recorded in VALIDATION.md. |
 | 3.13 | Included in the supported range. | Ubuntu and macOS. | Not recorded for this working tree. |
 | Future minor versions | Not declared until reviewed. | None until added deliberately. | None. |
 
@@ -118,10 +119,12 @@ CI. When changing delegation or other behavior, update the behavioral cases and
 record only the runtime evidence actually obtained. A release is not implied by
 these maintenance steps.
 
-The current source is prepared as the **v0.2.0 release candidate**. No Git tag
-or hosted release has been created. See [RELEASE_NOTES.md](RELEASE_NOTES.md) for
-the intended tag and user-visible changes, and
-[RELEASE_CHECKSUMS.txt](RELEASE_CHECKSUMS.txt) for the candidate file manifest.
+The current source may be reviewed as a **v0.2.0 local candidate**. `Intended tag`
+in [RELEASE_NOTES.md](RELEASE_NOTES.md) names that candidate; it does not establish
+a local or remote Git tag. A remote tag and a GitHub Release are separate facts
+that must each be verified in their respective services. [RELEASE_CHECKSUMS.txt](RELEASE_CHECKSUMS.txt)
+checks only the candidate's internal file-set, version, and hash consistency; it
+does not prove source provenance, a real tag, or resistance to malicious tampering.
 
 ## Use
 
@@ -211,10 +214,14 @@ It preserves existing plan documents and fails on unsafe/ambiguous output paths.
 ```sh
 python3 -m unittest discover -s tests -v
 python3 scripts/check_package.py
+python3 scripts/run_behavioral_cases.py --list
+python3 scripts/run_behavioral_cases.py --dry-run --output /tmp/codex-commander-behavioral-results.json
 ```
 
-These commands use temporary directories and do not call task tools or external
-services. Structural checks do not prove the quality of an interview. See
+The tests and package check use temporary directories and do not call task tools
+or external services. The Runner commands only list or plan packaged cases; they
+do not establish live task creation, sidebar placement, automatic recovery, or
+unattended delivery. Structural checks do not prove the quality of an interview. See
 [the behavioral evaluation guide](tests/behavioral-evaluation.md) and
 [validation status](VALIDATION.md) for what was actually exercised and what
 remains host-dependent.

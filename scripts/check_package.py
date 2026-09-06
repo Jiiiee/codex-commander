@@ -23,6 +23,12 @@ REQUIRED = (
 )
 VERSION_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 OPENAI_FIELDS = {"display_name", "short_description"}
+MACHINE_SPECIFIC_PATHS = (
+    re.compile(r"/(?:Users|Volumes|home)/[^\s`'\"<>()\[\]]+"),
+    re.compile(r"/(?:opt/homebrew|private/(?:var|tmp)|var/folders)/[^\s`'\"<>()\[\]]+"),
+    re.compile(r"[A-Za-z]:[\\\\/](?:Users|ProgramData|home)[\\\\/][^\s`'\"<>()\[\]]+"),
+    re.compile(r"\\\\[^\\\\/\s]+\\(?:Users|ProgramData|home)\\[^\s`'\"<>()\[\]]+"),
+)
 
 
 def check_version(root, errors):
@@ -213,24 +219,28 @@ def check(root=ROOT):
             errors.append(f"Missing file: {relative}")
     skill = root / "SKILL.md"
     if skill.exists():
-        text = skill.read_text(encoding="utf-8")
-        if not text.startswith("---\n") or "\n---\n" not in text[4:]:
-            errors.append("Missing skill YAML frontmatter")
+        try:
+            text = skill.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            errors.append("SKILL.md must be UTF-8")
         else:
-            header = text.split("---", 2)[1]
-            if not re.search(r"^name: codex-commander$", header, re.M):
-                errors.append("Skill name does not match the package")
-            description = re.search(r'^description: (".*")$', header, re.M)
-            if not description:
-                errors.append("Description must be a nonempty quoted scalar")
+            if not text.startswith("---\n") or "\n---\n" not in text[4:]:
+                errors.append("Missing skill YAML frontmatter")
             else:
-                try:
-                    if not json.loads(description.group(1)).strip():
-                        errors.append("Empty description")
-                except json.JSONDecodeError:
-                    errors.append("Description is not a valid quoted string")
-        if "[TODO" in text:
-            errors.append("Unfinished skill scaffold")
+                header = text.split("---", 2)[1]
+                if not re.search(r"^name: codex-commander$", header, re.M):
+                    errors.append("Skill name does not match the package")
+                description = re.search(r'^description: (".*")$', header, re.M)
+                if not description:
+                    errors.append("Description must be a nonempty quoted scalar")
+                else:
+                    try:
+                        if not json.loads(description.group(1)).strip():
+                            errors.append("Empty description")
+                    except json.JSONDecodeError:
+                        errors.append("Description is not a valid quoted string")
+            if "[TODO" in text:
+                errors.append("Unfinished skill scaffold")
     check_version(root, errors)
     check_release_checksums(root, errors)
     check_openai_yaml(root, errors)
@@ -248,7 +258,7 @@ def check(root=ROOT):
         except UnicodeDecodeError:
             errors.append(f"Non-UTF-8 text: {relative}")
             continue
-        if re.search(r"/(?:Users|Volumes)/[A-Za-z0-9]", content):
+        if any(pattern.search(content) for pattern in MACHINE_SPECIFIC_PATHS):
             errors.append(f"Machine-specific path: {relative}")
         if re.search(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", content, re.I):
             errors.append(f"Potential private runtime ID: {relative}")

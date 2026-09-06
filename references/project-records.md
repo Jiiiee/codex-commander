@@ -45,7 +45,7 @@ do not silently fall back to English.
 
 The helper:
 
-- Requires an explicit existing root; refuses filesystem/home/config roots and
+- Requires an explicit existing root; refuses filesystem, home, and config roots and
   its own skill directory, symlinked output paths, and a root `AGENTS.override.md`.
 - Adds or updates only its delimited section in `AGENTS.md`; content outside the
   section is preserved byte-for-byte. Duplicate/malformed markers cause a refusal.
@@ -62,6 +62,12 @@ The helper:
   lock on its opened project-root directory; it creates no shared lock path, and
   the kernel releases the lock when the descriptor closes or the process exits.
   After a filesystem failure, inspect the reported partial state before rerunning.
+
+For files the helper rewrites, its preservation promise is limited to ordinary
+POSIX permission bits (mode bits) where the platform and operation support them.
+Extended attributes, ACLs, filesystem flags, uid, gid, ownership inheritance,
+and platform-specific metadata are outside that promise and must be reviewed
+separately when they matter.
 
 Read the generated record and replace pending information with actual decisions
 as work progresses. A seeded file is not a completed plan or a finished task.
@@ -85,7 +91,10 @@ bindings, task IDs and current attempts, input version, state, and evidence need
 to resume. Keep the verified project binding and execution location separate
 from sidebar section state; default team placement is under that project.
 Only record a custom-section override when the user requested it. Put private
-project/section IDs in local state, not public project documents.
+project/section IDs in local state, not public project documents. Saved bindings
+are aids to a manual, verified restart, not an automatic-recovery mechanism:
+after interruption, re-check the project, task state, acceptance, and available
+tools before resuming. They do not establish unattended execution or delivery.
 Do not duplicate a full task log in several files. On restart, verify
 the target project, worker availability, and latest accepted artifact before
 dispatch; do not assume persisted IDs are still valid.

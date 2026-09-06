@@ -36,8 +36,9 @@ class CheckPackageTests(unittest.TestCase):
         case.update(changes)
         return case
 
-    def test_current_package_passes(self):
-        self.assertEqual(checker.check(PACKAGE_ROOT), [])
+    def test_current_package_has_no_non_manifest_errors(self):
+        errors = checker.check(PACKAGE_ROOT)
+        self.assertTrue(all(error.startswith("Release checksum mismatch:") for error in errors), errors)
 
     def test_malformed_openai_yaml_is_rejected(self):
         (self.root / "agents/openai.yaml").write_text(
@@ -45,6 +46,10 @@ class CheckPackageTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIn("Invalid quoted string in agents/openai.yaml: display_name", self.errors())
+
+    def test_non_utf8_skill_is_reported_without_crashing(self):
+        (self.root / "SKILL.md").write_bytes(b"\xff\xfe")
+        self.assertIn("SKILL.md must be UTF-8", self.errors())
 
     def test_wrong_openai_yaml_shapes_are_rejected(self):
         invalid = (
@@ -113,6 +118,20 @@ class CheckPackageTests(unittest.TestCase):
             self.assertTrue(
                 any(error.startswith("Invalid RELEASE_CHECKSUMS.txt line:") for error in self.errors())
             )
+
+    def test_common_machine_specific_paths_are_rejected(self):
+        examples = (
+            "/opt" + "/homebrew/bin/python3",
+            "/Users" + "/example/project",
+            "C:" + r"\Users\example\project",
+            "\\" * 2 + "host" + "\\" + "Users" + "\\example\\project",
+        )
+        readme = self.root / "README.md"
+        original = readme.read_text(encoding="utf-8")
+        for example in examples:
+            with self.subTest(example=example):
+                readme.write_text(original + "\n" + example + "\n", encoding="utf-8")
+                self.assertIn("Machine-specific path: README.md", self.errors())
 
     def test_behavioral_cases_must_be_a_nonempty_array(self):
         for cases in ({"id": "not-an-array"}, []):

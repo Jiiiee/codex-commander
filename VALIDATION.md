@@ -6,8 +6,8 @@ Version: 0.2.0. Date: 2026-09-06.
 
 | Check | Observed result |
 | --- | --- |
-| `/opt/homebrew/bin/python3.11 -B -m unittest discover -s tests -v` | 61 tests passed on macOS. |
-| `/opt/homebrew/bin/python3.12 -B -m unittest discover -s tests -v` | 61 tests passed on macOS. |
+| `python3.11 -B -m unittest discover -s tests -v` | 61 tests passed on macOS. |
+| `python3.12 -B -m unittest discover -s tests -v` | 61 tests passed on macOS. |
 | `python3 -B scripts/check_package.py` | Passed: required resources, local links, Python/JSON syntax, and the package's narrow portability checks. |
 | Codex `skill-creator` bundled `quick_validate.py` | Passed: `Skill is valid!` |
 | `agents/openai.yaml` | Unchanged from the parsed and length-checked 0.1.1 version. |
@@ -17,7 +17,8 @@ The unit tests use isolated temporary directories and cover release metadata,
 checksums, new records,
 English/Simplified/Traditional Chinese, all engineering levels, idempotency,
 byte preservation, existing plans, malformed markers, unsafe roots, symlinks,
-changed files, permission preservation, and partial failure reporting.
+changed files, mode-bit preservation, and partial failure reporting. They do not
+preserve or verify xattrs, ACLs, filesystem flags, uid, gid, or their inheritance.
 The 0.1.1 regression additionally checks that replacing legacy managed rules
 preserves the existing plan and unrelated instruction bytes, then becomes a
 no-op on a repeated run.
@@ -28,23 +29,23 @@ environment rather than added as a runtime dependency of this skill.
 
 ## Version 0.2.0 release-candidate evidence (unreleased)
 
-The following checks were run locally on macOS on 2026-09-06. They describe the
-current working tree. The intended tag is `v0.2.0`; no tag or hosted release
-has been created.
+The following checks were run locally on macOS on 2026-09-06 and describe that
+then-current working tree. `Intended tag: v0.2.0` labels a local candidate only;
+it is not evidence of a local or remote Git tag. A remote tag and a GitHub
+Release must be verified separately.
 
 | Check | Observed result |
 | --- | --- |
-| `/opt/homebrew/bin/python3.11 -B -m unittest discover -s tests -v` | 61 tests passed. |
-| `/opt/homebrew/bin/python3.11 -B scripts/check_package.py` | Passed. |
-| `/opt/homebrew/bin/python3.12 -B -m unittest discover -s tests -v` | 61 tests passed. |
-| `/opt/homebrew/bin/python3.12 -B scripts/check_package.py` | Passed. |
-| `.github/workflows/ci.yml` | Configures Ubuntu and macOS targets for Python 3.10, 3.12, and 3.13. No GitHub-hosted workflow execution was observed or is claimed. |
+| `python3.11 -B -m unittest discover -s tests -v` | 61 tests passed. |
+| `python3.11 -B scripts/check_package.py` | Passed. |
+| `python3.12 -B -m unittest discover -s tests -v` | 61 tests passed. |
+| `python3.12 -B scripts/check_package.py` | Passed. |
+| `.github/workflows/ci.yml` | Configures Ubuntu and macOS targets for Python 3.10–3.13. No GitHub-hosted workflow execution was observed or is claimed. |
 
-Python 3.11 has local evidence above but is not currently a configured CI
-target. Python 3.10 and 3.13 are configured targets, not locally verified by
-this record. See the README compatibility matrix for the distinction between
-the declared Python 3.10–3.13 support range, configured CI, and observed local
-results.
+Python 3.10–3.13 are configured targets. This historical record contains local
+evidence only for 3.11 and 3.12. Python 3.9 is not a supported version even if
+an invocation happens to run. See the README compatibility matrix for the
+distinction between declared support, configured CI, and observed local evidence.
 
 ## Version 0.2.0: automated quality and safe record writes
 
@@ -59,9 +60,29 @@ while apply safely refuses there.
 The bilingual documentation now distinguishes documented support, configured
 CI, and observed local evidence; it also documents local upgrade and
 maintenance boundaries. `RELEASE_NOTES.md` declares version `0.2.0` and the
-intended tag `v0.2.0`. `RELEASE_CHECKSUMS.txt` records SHA-256 values for
-every candidate source file except the checksum manifest itself. The package
-checker verifies the version, tag, file set, and hashes together.
+intended tag `v0.2.0`. `RELEASE_CHECKSUMS.txt` records SHA-256 values for every
+candidate source file except the checksum manifest itself. The package checker
+verifies only internal version, file-set, and hash consistency; it does not prove
+source provenance, a local or remote Git tag, a GitHub Release, or resistance to
+malicious tampering.
+
+## COD-16 publication-boundary verification
+
+This verification was run locally on macOS on 2026-09-06 against the integrated
+candidate. It is local evidence, not a hosted CI run, a remote-tag check, or a
+GitHub Release check.
+
+| Check | Observed result |
+| --- | --- |
+| `python3.11 -B -m unittest discover -s tests -v` | 71 tests passed. |
+| `python3.12 -B -m unittest discover -s tests -v` | 71 tests passed. |
+| Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
+| `scripts/check_package.py` | Reported only `RELEASE_CHECKSUMS.txt` hash mismatches for integrated candidate files. |
+| `SKILL.md` byte comparison | Unchanged from the COD-16 input commit. |
+
+`RELEASE_CHECKSUMS.txt` is intentionally not updated in this task. COD-17 must
+recompute it from the final reviewed candidate; until then, the package checker
+correctly reports manifest drift rather than a clean package result.
 
 ## Version 0.1.3: bilingual publication preparation
 

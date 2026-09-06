@@ -83,9 +83,10 @@ ln -s "$PWD" ~/.agents/skills/codex-commander
 
 | Python | 声明的支持 | 已配置的 CI 目标 | 当前本机证据 |
 | --- | --- | --- | --- |
+| 3.9 | 不受支持；即使本机恰好能够运行，也不改变此结论。 | 不作为目标。 | 无。 |
 | 3.10 | 最低支持版本。 | Ubuntu 与 macOS。 | 本工作树尚未记录。 |
-| 3.11 | 属于当前支持范围。 | 当前不是 CI 目标。 | macOS 上 61 项测试与包检查通过。 |
-| 3.12 | 属于当前支持范围。 | Ubuntu 与 macOS。 | macOS 上 61 项测试与包检查通过。 |
+| 3.11 | 属于当前支持范围。 | Ubuntu 与 macOS。 | 本机证据见 VALIDATION.md。 |
+| 3.12 | 属于当前支持范围。 | Ubuntu 与 macOS。 | 本机证据见 VALIDATION.md。 |
 | 3.13 | 属于当前支持范围。 | Ubuntu 与 macOS。 | 本工作树尚未记录。 |
 | 后续小版本 | 未审阅前不声明支持。 | 未明确加入前不配置。 | 无。 |
 
@@ -103,9 +104,10 @@ ln -s "$PWD" ~/.agents/skills/codex-commander
 Python 与操作系统组合，并分别记录本机证据和已经完成的托管 CI。委派或其他行为改变时，
 更新行为用例，并只记录实际取得的运行时证据。这些维护步骤不代表已经发布新版本。
 
-当前源码已准备为 **v0.2.0 发布候选**，但尚未创建 Git Tag，也没有发布托管
-Release。拟用 Tag 与用户可见变更见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，
-候选文件清单及校验值见 [RELEASE_CHECKSUMS.txt](RELEASE_CHECKSUMS.txt)。
+当前源码可作为 **v0.2.0 本地候选** 审阅。[RELEASE_NOTES.md](RELEASE_NOTES.md)
+中的“拟用 Tag”只标识该候选，不证明本地或远端 Git Tag 存在；远端 Tag 和 GitHub
+Release 是两项独立事实，分别需要在对应服务中核实。[RELEASE_CHECKSUMS.txt](RELEASE_CHECKSUMS.txt)
+仅检查候选内文件集合、版本字符串和哈希的内部一致性，不证明来源、真实 Tag，也不能防御恶意篡改。
 
 ## 使用方法
 
@@ -187,9 +189,12 @@ python3 scripts/project_records.py --root /absolute/path/to/project \
 ```sh
 python3 -m unittest discover -s tests -v
 python3 scripts/check_package.py
+python3 scripts/run_behavioral_cases.py --list
+python3 scripts/run_behavioral_cases.py --dry-run --output /tmp/codex-commander-behavioral-results.json
 ```
 
-这些命令使用临时目录，不调用真实任务工具或外部服务。
+测试和包检查使用临时目录，不调用真实任务工具或外部服务。Runner 命令只列出或规划
+内置用例，不能证明真实任务创建、侧边栏归属、自动恢复或无人值守送达。
 结构检查通过不代表需求追问或团队协调一定正确。
 实际验证范围和仍依赖客户端的能力，见[行为评估说明](tests/behavioral-evaluation.md)
 与[验证记录](VALIDATION.md)。
