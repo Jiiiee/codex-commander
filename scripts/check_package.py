@@ -95,6 +95,22 @@ WRAPPER_CLOSERS = {
     "《": "》",
     "<": ">",
 }
+# ``=``/``%`` have dedicated phase transitions; URI component stops and a
+# literal ``&``/single ``~`` are not document evidence by themselves.  A
+# bounded ``&...;`` entity is promoted to evidence while scanning separators.
+RESIDUAL_NON_DOCUMENT_STRUCTURAL_CHARACTERS = frozenset("=%/\\?#&~")
+RESIDUAL_DOCUMENT_MARKERS = tuple(
+    sorted(
+        set(WRAPPER_CLOSERS)
+        | set(WRAPPER_CLOSERS.values())
+        | set(
+            RESIDUAL_TOKEN_STRUCTURAL_DELIMITERS.difference(
+                RESIDUAL_NON_DOCUMENT_STRUCTURAL_CHARACTERS
+            )
+        ),
+        key=lambda marker: (-len(marker), marker),
+    )
+)
 # Once a recognized wrapper closer starts the residual state machine, every
 # structural delimiter except the two control characters handled separately
 # below is an ambiguous separator.  Keeping this category grammar-derived lets
@@ -188,6 +204,18 @@ def _decoded_html_prefix(value):
     return index, False
 
 
+def _residual_document_marker(value, index):
+    """Return the longest complete wrapper/document marker at one position."""
+    return next(
+        (
+            marker
+            for marker in RESIDUAL_DOCUMENT_MARKERS
+            if value.startswith(marker, index)
+        ),
+        None,
+    )
+
+
 def _decoded_boundary_kind(
     value, allow_token, restart_closer=None, terminal_closers=()
 ):
@@ -212,9 +240,11 @@ def _decoded_boundary_kind(
     token_length = 0
     token_characters = 0
     has_restarted = False
+    has_contradictory_marker = False
     while index < len(value):
-        if restart_closer and value.startswith(restart_closer, index):
-            if has_restarted:
+        document_marker = _residual_document_marker(value, index)
+        if restart_closer and document_marker == restart_closer:
+            if has_restarted or has_contradictory_marker:
                 return True, False
             index += len(restart_closer)
             separator_characters = 0
@@ -226,6 +256,8 @@ def _decoded_boundary_kind(
             value.startswith(closer, index) for closer in terminal_closers
         ):
             return False, False
+        if document_marker is not None:
+            has_contradictory_marker = True
         character = value[index]
         if character == "=":
             return token_length > 0, False
@@ -237,6 +269,8 @@ def _decoded_boundary_kind(
         if separator_end is not None:
             if not allow_token:
                 return False, False
+            if character == "&" and separator_end > index + 1:
+                has_contradictory_marker = True
             token_length = 0
             separator_characters += separator_end - index
             if separator_characters > MAX_RESIDUAL_SEPARATOR_CHARACTERS:
@@ -329,9 +363,11 @@ def _raw_residual_boundary(
     token_characters = 0
     separator_characters = 0
     has_restarted = False
+    has_contradictory_marker = False
     while index < len(candidate):
-        if restart_closer and candidate.startswith(restart_closer, index):
-            if has_restarted:
+        document_marker = _residual_document_marker(candidate, index)
+        if restart_closer and document_marker == restart_closer:
+            if has_restarted or has_contradictory_marker:
                 return True, False, False
             index += len(restart_closer)
             separator_characters = 0
@@ -343,6 +379,8 @@ def _raw_residual_boundary(
             candidate.startswith(closer, index) for closer in terminal_closers
         ):
             return False, False, False
+        if document_marker is not None:
+            has_contradictory_marker = True
         character = candidate[index]
         if character == "=":
             return token_length > 0, False, False
@@ -354,6 +392,8 @@ def _raw_residual_boundary(
         if separator_exhausted:
             return False, False, True
         if separator_end is not None:
+            if character == "&" and separator_end > index + 1:
+                has_contradictory_marker = True
             token_length = 0
             separator_characters += separator_end - index
             if separator_characters > MAX_RESIDUAL_SEPARATOR_CHARACTERS:

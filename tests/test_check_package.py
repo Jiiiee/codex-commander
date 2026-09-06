@@ -604,6 +604,173 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 self.assertTrue(checker.contains_machine_specific_path(example))
 
+    def test_alternate_wrapper_closers_cannot_clear_residual_ambiguity(self):
+        examples = (
+            "~~https://example.test/guide~~foo*bar%3Fbaz/"
+            + "opt/vendor/tool~~",
+            "~~https://example.test/guide~~foo'bar%23baz/"
+            + "Users/alice/private~~",
+            "*https://example.test/guide*foo~~bar%3Fbaz/"
+            + "opt/vendor/tool*",
+            "~~https://example.test/guide~~foo%2Abar%253Fbaz%252F"
+            + "root%252Fprivate%7E%7E",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_alternate_closer_cross_product_rejects_raw_encoded_and_nested_paths(self):
+        symmetric_wrappers = (
+            ("'", "'"),
+            ("*", "*"),
+            ("**", "**"),
+            ("_", "_"),
+            ("__", "__"),
+            ("~~", "~~"),
+        )
+        alternate_closers = (
+            ("star-raw", "*"),
+            ("strong-raw", "**"),
+            ("underscore-raw", "_"),
+            ("double-underscore-raw", "__"),
+            ("strike-raw", "~~"),
+            ("apostrophe-raw", "'"),
+            ("star-encoded", "%2A"),
+            ("underscore-encoded", "%5F"),
+            ("strike-encoded", "%7E%7E"),
+            ("apostrophe-encoded", "%27"),
+            ("parenthesis-document", ")"),
+            ("bracket-document", "]"),
+            ("cjk-document", "）"),
+            ("parenthesis-opener-raw", "("),
+            ("bracket-opener-raw", "["),
+            ("brace-raw", "{"),
+            ("parenthesis-opener-encoded", "%28"),
+            ("bracket-opener-encoded", "%5B"),
+            ("brace-encoded", "%7B"),
+            ("html-entity-raw", "&amp;amp;"),
+            ("html-entity-encoded", "%26amp%3B"),
+        )
+        uri_stops = (
+            ("query-raw", "?", "/"),
+            ("fragment-raw", "#", "/"),
+            ("path-raw", "/", "/"),
+            ("query-encoded", "%3F", "%2F"),
+            ("fragment-encoded", "%23", "%2F"),
+            ("path-encoded", "%2F", "%2F"),
+        )
+        for opener, closer in symmetric_wrappers:
+            for alternate_name, alternate in alternate_closers:
+                for stop_name, stop, path_separator in uri_stops:
+                    residual = (
+                        "foo"
+                        + alternate
+                        + "bar"
+                        + stop
+                        + "baz"
+                        + path_separator
+                        + "opt"
+                        + path_separator
+                        + "vendor"
+                        + path_separator
+                        + "tool"
+                        + closer
+                    )
+                    example = (
+                        opener + "https://example.test/guide" + closer + residual
+                    )
+                    with self.subTest(
+                        wrapper=opener,
+                        alternate=alternate_name,
+                        stop=stop_name,
+                    ):
+                        self.assertTrue(
+                            checker.contains_machine_specific_path(example)
+                        )
+
+            alternate = "~~" if closer != "~~" else "*"
+            encoded_alternate = "%7E%7E" if closer != "~~" else "%2A"
+            for html_name, html_mixed in (
+                ("html-raw", "&amp;"),
+                ("html-percent", "%26amp%3B"),
+            ):
+                for alternate_form in (alternate, encoded_alternate):
+                    residual = (
+                        "foo"
+                        + alternate_form
+                        + "bar"
+                        + html_mixed
+                        + "qux%3Fbaz/"
+                        + "opt/vendor/tool"
+                        + closer
+                    )
+                    example = (
+                        opener + "https://example.test/guide" + closer + residual
+                    )
+                    with self.subTest(
+                        wrapper=opener,
+                        alternate=alternate_form,
+                        html=html_name,
+                    ):
+                        self.assertTrue(
+                            checker.contains_machine_specific_path(example)
+                        )
+
+        outer_wrappers = (("(", ")"), ("（", "）"), ("「", "」"), ("【", "】"))
+        for opener, closer in symmetric_wrappers:
+            alternate = "~~" if closer != "~~" else "*"
+            for outer_opener, outer_closer in outer_wrappers:
+                example = (
+                    outer_opener
+                    + opener
+                    + "https://example.test/guide"
+                    + closer
+                    + "foo"
+                    + alternate
+                    + "bar%3Fbaz/"
+                    + "opt/vendor/tool"
+                    + closer
+                    + outer_closer
+                )
+                with self.subTest(wrapper=opener, outer=outer_opener):
+                    self.assertTrue(
+                        checker.contains_machine_specific_path(example)
+                    )
+
+    def test_html_encoded_document_closers_preserve_residual_ambiguity(self):
+        examples = (
+            "~~https://example.test/guide~~foo&apos;bar%3Fbaz/"
+            + "opt/vendor/tool~~",
+            "~~https://example.test/guide~~foo&amp;apos;bar%23baz/"
+            + "Users/alice/private~~",
+            "*https://example.test/guide*foo&lowbar;bar%3Fbaz/"
+            + "opt/vendor/tool*",
+            "~~https://example.test/guide~~foo%26apos%3Bbar%253Fbaz%252F"
+            + "root%252Fprivate%7E%7E",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
+    def test_wrapper_openers_structural_markers_and_html_entities_are_contradictions(self):
+        examples = (
+            "~~https://example.test/guide~~foo(bar%3Fbaz/"
+            + "opt/vendor/tool~~",
+            "~~https://example.test/guide~~foo%28bar%253Fbaz%252F"
+            + "root%252Fprivate%7E%7E",
+            "~~https://example.test/guide~~foo%5Bbar%2523baz%252F"
+            + "home%252Falice%7E%7E",
+            "~~https://example.test/guide~~foo&amp;amp;bar%3Fbaz/"
+            + "opt/vendor/tool~~",
+            "~~https://example.test/guide~~foo%26amp%3Bbar%253Fbaz%252F"
+            + "root%252Fprivate%7E%7E",
+            "~~https://example.test/guide~~foo%7Bbar%253Fbaz%252F"
+            + "root%252Fprivate%7E%7E",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertTrue(checker.contains_machine_specific_path(example))
+
     def test_repeated_closer_matrix_covers_raw_encoded_and_mixed_uri_stops(self):
         def encode_every_byte(value):
             return "".join(f"%{byte:02X}" for byte in value.encode("utf-8"))
@@ -662,6 +829,22 @@ class CheckPackageTests(unittest.TestCase):
             "~~https://example.test/release~~notes/" + "Users/alice/guide~~",
             "[guide](https://example.test/release*notes/" + "opt/tool)",
             "<https://example.test/release*notes/" + "opt/tool>",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertFalse(checker.contains_machine_specific_path(example))
+
+    def test_non_document_uri_tokens_and_explicit_markers_remain_valid(self):
+        examples = (
+            "~~https://example.test/release~~notes/" + "Users/alice/guide~~",
+            "*https://example.test/release*notes/" + "opt/tool*",
+            "~~https://example.test/release~~notes~part/"
+            + "Users/alice/guide~~",
+            "~~https://example.test/release~~notes&part/network/guide~~",
+            "~~https://example.test/release~~notes?part=network/guide~~",
+            "~~https://example.test/release~~notes#part=network/guide~~",
+            "[guide](https://example.test/release%28notes%29/" + "opt/tool)",
+            "<https://example.test/release%7Bnotes%7D/" + "opt/tool>",
         )
         for example in examples:
             with self.subTest(example=example):
