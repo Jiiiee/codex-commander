@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "tests/behavioral-cases.json"
 SKILL_SOURCE = ROOT / "SKILL.md"
 SKILL_REQUEST_PATH = Path("SKILL.md")
-MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
+MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
+INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 RESULT_SCHEMA_VERSION = 1
 REQUEST_SCHEMA_VERSION = 1
 EXIT_SUCCESS = 0
@@ -92,8 +93,28 @@ def dry_run(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _local_markdown_target(target: str, source: Path) -> Path | None:
+    """Return a safely decoded local target, or None for a non-file link."""
+    target = target.strip("<>")
+    try:
+        parsed = urlsplit(target)
+    except ValueError as exc:
+        raise RunnerError(f"invalid local link target in {source}: {target}") from exc
+    if parsed.scheme or parsed.netloc or not parsed.path:
+        return None
+    if INVALID_PERCENT_ESCAPE.search(parsed.path):
+        raise RunnerError(f"invalid local link target in {source}: {target}")
+    try:
+        decoded = unquote(parsed.path, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RunnerError(f"invalid local link target in {source}: {target}") from exc
+    if "\x00" in decoded:
+        raise RunnerError(f"invalid local link target in {source}: {target}")
+    return Path(decoded)
+
+
 def skill_snapshot_sources() -> list[tuple[Path, Path]]:
-    """Return the smallest package-root-local closure of Markdown references."""
+    """Return the smallest package-root-local closure of local file references."""
     package_root = SKILL_SOURCE.parent.resolve()
     pending = [SKILL_SOURCE]
     sources: list[tuple[Path, Path]] = []
@@ -120,13 +141,10 @@ def skill_snapshot_sources() -> list[tuple[Path, Path]]:
         except (OSError, UnicodeDecodeError) as exc:
             raise RunnerError(f"cannot read skill package file {relative}: {exc}") from exc
         for match in MARKDOWN_LINK.finditer(content):
-            target = match.group("target").strip("<>")
-            parsed = urlsplit(target)
-            if parsed.scheme or parsed.netloc or not parsed.path:
+            linked_path = _local_markdown_target(match.group("target"), relative)
+            if linked_path is None:
                 continue
-            linked = source.parent / unquote(parsed.path)
-            if linked.suffix.lower() == ".md":
-                pending.append(linked)
+            pending.append(source.parent / linked_path)
 
     return sources
 
@@ -182,7 +200,7 @@ def run_case(
     input_text = json.dumps(request, ensure_ascii=False) + "\n"
 
     # A fresh writable directory is the complete filesystem boundary we can
-    # provide portably. Supply the skill's local Markdown reference closure as a
+    # provide portably. Supply the skill's local file reference closure as a
     # read-only snapshot so relative links resolve without passing the repository
     # path to the evaluator. POSIX additionally gets a fresh process group so a
     # timeout or interrupt can terminate descendants.

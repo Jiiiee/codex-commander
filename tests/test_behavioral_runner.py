@@ -5,18 +5,48 @@ import io
 import json
 import os
 from pathlib import Path
-import stat
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
+from urllib.parse import unquote, urlsplit
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT / "scripts"))
 import run_behavioral_cases as runner
+
+
+MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
+
+
+def local_markdown_targets(source):
+    content = source.read_text(encoding="utf-8")
+    for match in MARKDOWN_LINK.finditer(content):
+        parsed = urlsplit(match.group("target").strip("<>"))
+        if parsed.scheme or parsed.netloc or not parsed.path:
+            continue
+        yield source.parent / unquote(parsed.path)
+
+
+def expected_skill_snapshot():
+    package_root = PACKAGE_ROOT.resolve()
+    pending = [package_root / "SKILL.md"]
+    expected = {}
+    while pending:
+        source = pending.pop(0).resolve(strict=True)
+        relative = source.relative_to(package_root)
+        if str(relative) in expected:
+            continue
+        if not source.is_file():
+            raise AssertionError(f"test package link is not a file: {relative}")
+        expected[str(relative)] = source.read_bytes().hex()
+        if source.suffix.lower() == ".md":
+            pending.extend(local_markdown_targets(source))
+    return expected
 
 
 class BehavioralRunnerTests(unittest.TestCase):
@@ -103,43 +133,48 @@ print(json.dumps({"request": request, "cwd": os.getcwd()}, ensure_ascii=False))
 
     def test_real_evaluator_reads_complete_isolated_skill_snapshot(self):
         self.write_cases("skill-source")
-        expected_paths = {
+        required_paths = {
             "SKILL.md",
             "NOTICE.md",
             "references/engineering-depth.md",
             "references/project-records.md",
             "references/sidebar-coordination.md",
+            "licenses/mattpocock-skills-MIT.txt",
         }
-        expected_content = {
-            relative: (PACKAGE_ROOT / relative).read_text(encoding="utf-8")
-            for relative in expected_paths
-        }
+        expected_content = expected_skill_snapshot()
+        self.assertTrue(required_paths <= expected_content.keys())
         forbidden_root = str(PACKAGE_ROOT.resolve())
-        evaluator = f"""
+        evaluator = rf"""
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
+from urllib.parse import unquote, urlsplit
 
 request = json.load(sys.stdin)
 skill_path = Path(request["skill"])
 expected = {expected_content!r}
 forbidden_root = {forbidden_root!r}
 actual = {{
-    str(path.relative_to(Path.cwd())): path.read_text(encoding="utf-8")
+    str(path.relative_to(Path.cwd())): path.read_bytes().hex()
     for path in Path.cwd().rglob("*")
     if path.is_file()
 }}
-required_references = [
-    Path("references/engineering-depth.md"),
-    Path("references/sidebar-coordination.md"),
-    Path("references/project-records.md"),
-]
-reference_content = {{
-    str(path): path.read_text(encoding="utf-8") for path in required_references
-}}
-write_bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+markdown_link = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
+checked_links = []
+for markdown_path in sorted(Path.cwd().rglob("*.md")):
+    content = markdown_path.read_text(encoding="utf-8")
+    for match in markdown_link.finditer(content):
+        parsed = urlsplit(match.group("target").strip("<>"))
+        if parsed.scheme or parsed.netloc or not parsed.path:
+            continue
+        target = markdown_path.parent / unquote(parsed.path)
+        relative = str(target.resolve(strict=True).relative_to(Path.cwd()))
+        assert target.is_file()
+        assert target.read_bytes().hex() == expected[relative]
+        checked_links.append((str(markdown_path.relative_to(Path.cwd())), relative))
 modes = {{
     relative: stat.S_IMODE(Path(relative).stat().st_mode) for relative in actual
 }}
@@ -147,10 +182,9 @@ request_text = json.dumps(request, ensure_ascii=False)
 environment_leaks = [
     name for name, value in os.environ.items() if forbidden_root in value
 ]
-assert skill_path.read_text(encoding="utf-8") == expected["SKILL.md"]
-assert reference_content == {{path: expected[path] for path in reference_content}}
+assert skill_path.read_bytes().hex() == expected["SKILL.md"]
 assert actual == expected
-assert all(mode & write_bits == 0 for mode in modes.values())
+assert all(mode == 0o444 for mode in modes.values())
 assert forbidden_root not in request_text
 assert not environment_leaks
 assert "OLDPWD" not in os.environ
@@ -161,6 +195,7 @@ print(json.dumps({{
     "cwd": os.getcwd(),
     "files": sorted(actual),
     "modes": modes,
+    "checkedLinks": checked_links,
     "environmentLeaks": environment_leaks,
 }}))
 """
@@ -177,13 +212,88 @@ print(json.dumps({{
         result = json.loads(self.output.read_text(encoding="utf-8"))["results"][0]
         response = json.loads(result["response"])
         self.assertEqual(response["path"], "SKILL.md")
-        self.assertEqual(set(response["files"]), expected_paths)
-        write_bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
-        self.assertTrue(all(mode & write_bits == 0 for mode in response["modes"].values()))
+        self.assertEqual(set(response["files"]), set(expected_content))
+        self.assertTrue(response["checkedLinks"])
+        self.assertTrue(all(mode == 0o444 for mode in response["modes"].values()))
         self.assertEqual(response["environmentLeaks"], [])
         evaluator_cwd = Path(response["cwd"])
         self.assertNotEqual(evaluator_cwd, PACKAGE_ROOT)
         self.assertFalse(evaluator_cwd.exists())
+
+    def test_skill_snapshot_follows_local_files_regardless_of_extension(self):
+        package = self.root / "package"
+        (package / "references").mkdir(parents=True)
+        (package / "licenses").mkdir()
+        skill = package / "SKILL.md"
+        notice = package / "NOTICE.md"
+        skill.write_text(
+            "[notice](NOTICE.md)\n[reference](references/guide.md)\n",
+            encoding="utf-8",
+        )
+        notice.write_text("[license](licenses/terms.txt)\n", encoding="utf-8")
+        (package / "references" / "guide.md").write_text(
+            "guide", encoding="utf-8"
+        )
+        (package / "licenses" / "terms.txt").write_bytes(b"license bytes\x00\xff")
+
+        with mock.patch.object(runner, "SKILL_SOURCE", skill):
+            sources = runner.skill_snapshot_sources()
+
+        self.assertEqual(
+            {str(relative) for _, relative in sources},
+            {
+                "SKILL.md",
+                "NOTICE.md",
+                "references/guide.md",
+                "licenses/terms.txt",
+            },
+        )
+
+    def test_skill_snapshot_rejects_unsafe_local_file_targets(self):
+        package = self.root / "package"
+        package.mkdir()
+        skill = package / "SKILL.md"
+        (self.root / "outside.txt").write_text("outside", encoding="utf-8")
+        (package / "directory").mkdir()
+        cases = {
+            "directory": "[bad](directory)",
+            "escape": "[bad](../outside.txt)",
+            "missing": "[bad](missing.txt)",
+            "invalid-percent": "[bad](bad%ZZ.txt)",
+            "invalid-utf8": "[bad](bad%FF.txt)",
+            "nul-byte": "[bad](bad%00.txt)",
+        }
+
+        with mock.patch.object(runner, "SKILL_SOURCE", skill):
+            for label, content in cases.items():
+                with self.subTest(label=label):
+                    skill.write_text(content, encoding="utf-8")
+                    with self.assertRaises(runner.RunnerError):
+                        runner.skill_snapshot_sources()
+
+    def test_skill_snapshot_ignores_remote_anchor_and_non_file_links(self):
+        package = self.root / "package"
+        package.mkdir()
+        skill = package / "SKILL.md"
+        skill.write_text(
+            "\n".join(
+                [
+                    "[remote](https://example.com/file.txt)",
+                    "[anchor](#section)",
+                    "[mail](mailto:test@example.com)",
+                    "[data](data:text/plain,hello)",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(runner, "SKILL_SOURCE", skill):
+            sources = runner.skill_snapshot_sources()
+
+        self.assertEqual(
+            [(source.name, str(relative)) for source, relative in sources],
+            [("SKILL.md", "SKILL.md")],
+        )
 
     def test_real_nonzero_exit_is_a_case_failure_and_later_case_runs(self):
         self.write_cases("bad", "good")
