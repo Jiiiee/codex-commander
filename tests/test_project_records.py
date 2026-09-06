@@ -30,13 +30,56 @@ class ProjectRecordsTests(unittest.TestCase):
     def apply(self, **kwargs):
         return records.apply_plan(self.plan(**kwargs))
 
-    def snapshot(self):
-        return {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+    def snapshot(self, root=None):
+        root = self.root if root is None else root
+        return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
     def test_preview_has_no_filesystem_writes(self):
         plan = self.plan()
         self.assertEqual({change.action for change in plan.changes}, {"create"})
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_stable_root_identity_is_bound_to_plan_and_applies(self):
+        status = os.stat(self.root, follow_symlinks=False)
+        plan = self.plan()
+        self.assertEqual(plan.root_identity, records.RootIdentity(status.st_dev, status.st_ino))
+        self.assertEqual(records.apply_plan(plan), ["docs/commander.md", "AGENTS.md"])
+
+    def test_same_path_new_root_after_plan_refuses_without_writes(self):
+        project = self.root / "project"
+        project.mkdir()
+        plan = records.plan_records(project, "en", "maintainable", "A local tool")
+        original = self.root / "project-original"
+        project.rename(original)
+        project.mkdir()
+        (project / "replacement.txt").write_text("new root")
+        before_original = self.snapshot(original)
+        before_replacement = self.snapshot(project)
+
+        with self.assertRaisesRegex(records.RecordError, "root identity changed since preview"):
+            records.apply_plan(plan)
+
+        self.assertEqual(self.snapshot(original), before_original)
+        self.assertEqual(self.snapshot(project), before_replacement)
+
+    def test_symlink_replacement_after_plan_refuses_without_external_writes(self):
+        project = self.root / "project"
+        project.mkdir()
+        plan = records.plan_records(project, "en", "maintainable", "A local tool")
+        original = self.root / "project-original"
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "sentinel.txt").write_text("outside")
+        project.rename(original)
+        project.symlink_to(outside, target_is_directory=True)
+        before_original = self.snapshot(original)
+        before_outside = self.snapshot(outside)
+
+        with self.assertRaises(records.RecordError):
+            records.apply_plan(plan)
+
+        self.assertEqual(self.snapshot(original), before_original)
+        self.assertEqual(self.snapshot(outside), before_outside)
 
     def test_apply_creates_only_the_two_records(self):
         self.apply()
@@ -234,7 +277,7 @@ class ProjectRecordsTests(unittest.TestCase):
         self.apply()
         self.assertEqual(stat.S_IMODE(agents.stat().st_mode), 0o640)
 
-    def test_real_crash_during_first_write_keeps_restricted_original_and_temporary(self):
+    def test_real_crash_during_first_write_keeps_original_then_rerun_cleans_temporary(self):
         agents = self.root / "AGENTS.md"
         original = b"Existing restricted rules\n"
         agents.write_bytes(original)
@@ -313,6 +356,168 @@ records.apply_plan(plan)
         self.assertNotEqual(temporary_paths[0].read_bytes(), b"")
         self.assertEqual(stat.S_IMODE(temporary_paths[0].stat().st_mode), temporary_mode)
         self.assertEqual(temporary_mode & ~0o600, 0)
+
+        self.apply()
+        self.assertFalse(temporary_paths[0].exists())
+        self.assertTrue((self.root / "AGENTS.md").read_bytes().startswith(original))
+
+    def test_real_crash_before_first_publish_leaves_no_empty_docs_and_rerun_cleans(self):
+        marker = self.root.parent / f"{self.root.name}-record-write"
+        self.addCleanup(marker.unlink, missing_ok=True)
+        child = r'''
+import os
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, sys.argv[1])
+import project_records as records
+
+root = Path(sys.argv[2])
+marker = Path(sys.argv[3])
+real_fdopen = os.fdopen
+
+class PausingWriter:
+    def __init__(self, *args, **kwargs):
+        self.handle = real_fdopen(*args, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return self.handle.__exit__(*args)
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def write(self, content):
+        written = self.handle.write(content)
+        self.handle.flush()
+        marker.write_text("ready")
+        while True:
+            time.sleep(1)
+        return written
+
+records.os.fdopen = PausingWriter
+records.apply_plan(records.plan_records(root, "en", "maintainable", "A local tool"))
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-c", child, str(Path(records.__file__).parent), str(self.root), str(marker)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not marker.exists():
+                stderr = process.communicate(timeout=1)[1] if process.poll() is not None else "child did not reach record write"
+                self.fail(stderr)
+            temporary_paths = list(self.root.glob(".commander-*"))
+            self.assertEqual(len(temporary_paths), 1)
+            self.assertFalse((self.root / "docs").exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.stderr.close()
+
+        self.assertEqual(process.returncode, -9)
+        self.assertTrue(temporary_paths[0].exists())
+        self.assertEqual(self.apply(), ["docs/commander.md", "AGENTS.md"])
+        self.assertFalse(temporary_paths[0].exists())
+        self.assertTrue((self.root / "docs/commander.md").is_file())
+
+    def test_real_crash_after_parent_creation_recovers_empty_docs_and_temporary(self):
+        marker = self.root.parent / f"{self.root.name}-before-link"
+        self.addCleanup(marker.unlink, missing_ok=True)
+        child = r'''
+import os
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, sys.argv[1])
+import project_records as records
+
+root = Path(sys.argv[2])
+marker = Path(sys.argv[3])
+
+def pause_before_link(*args, **kwargs):
+    marker.write_text("ready")
+    while True:
+        time.sleep(1)
+
+records.os.link = pause_before_link
+records.apply_plan(records.plan_records(root, "en", "maintainable", "A local tool"))
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-c", child, str(Path(records.__file__).parent), str(self.root), str(marker)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not marker.exists():
+                stderr = process.communicate(timeout=1)[1] if process.poll() is not None else "child did not reach publish"
+                self.fail(stderr)
+            temporary_paths = list(self.root.glob(".commander-*"))
+            self.assertEqual(len(temporary_paths), 1)
+            self.assertTrue((self.root / "docs").is_dir())
+            self.assertEqual(list((self.root / "docs").iterdir()), [])
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.stderr.close()
+
+        self.assertEqual(process.returncode, -9)
+        self.assertEqual(self.apply(), ["docs/commander.md", "AGENTS.md"])
+        self.assertFalse(temporary_paths[0].exists())
+        self.assertEqual([path.name for path in (self.root / "docs").iterdir()], ["commander.md"])
+
+    def test_cleanup_preserves_legacy_different_plan_and_uncertain_carriers(self):
+        plan = self.plan()
+        change = plan.changes[0]
+        past = time.time_ns() - 1_000_000_000
+
+        verified = self.root / records.temporary_name(change.path, change.after, past)
+        verified.write_bytes(change.after[:17])
+
+        legacy = self.root / f".commander-{os.urandom(16).hex()}"
+        legacy.write_bytes(change.after)
+        wrong_path = self.root / records.temporary_name(self.root / "other.md", change.after, past)
+        wrong_path.write_bytes(change.after)
+        different_change = self.plan(language="zh-CN", goal="另一份计划").changes[0]
+        different_plan = self.root / records.temporary_name(
+            different_change.path, different_change.after, past,
+        )
+        different_plan.write_bytes(different_change.after)
+        wrong_content = self.root / records.temporary_name(change.path, change.after, past)
+        wrong_content.write_bytes(b"not a prefix of the expected record")
+        uncertain_age = self.root / records.temporary_name(change.path, change.after, time.time_ns() + 10**12)
+        uncertain_age.write_bytes(change.after)
+        wrong_type = self.root / records.temporary_name(change.path, change.after, past)
+        wrong_type.mkdir()
+        linked = self.root / records.temporary_name(change.path, change.after, past)
+        linked.write_bytes(change.after)
+        linked_alias = self.root / "linked-alias"
+        os.link(linked, linked_alias)
+        symlink = self.root / records.temporary_name(change.path, change.after, past)
+        symlink.symlink_to(legacy.name)
+
+        records.apply_plan(plan)
+
+        self.assertFalse(verified.exists())
+        for uncertain in (
+            legacy, wrong_path, different_plan, wrong_content, uncertain_age, wrong_type, linked, linked_alias, symlink,
+        ):
+            with self.subTest(path=uncertain.name):
+                self.assertTrue(uncertain.exists() or uncertain.is_symlink())
 
     def test_new_temporary_files_are_private_before_first_write(self):
         observed_modes = []
@@ -487,8 +692,9 @@ records.apply_plan(plan)
                 records.apply_plan(plan)
 
         self.assertFalse((self.root / "docs/commander.md").exists())
+        self.assertFalse((self.root / "docs").exists())
         self.assertEqual(list(self.root.glob(".codex-commander*")), [])
-        self.assertEqual(list((self.root / "docs").glob(".commander-*")), [])
+        self.assertEqual(list(self.root.glob(".commander-*")), [])
         self.assertEqual(records.apply_plan(plan), ["docs/commander.md", "AGENTS.md"])
 
     def test_cooperating_writer_is_rejected_during_replace_window(self):
@@ -554,7 +760,7 @@ records.apply_plan(plan)
 
         self.assertEqual(
             [event for event in events if event in {"link", "unlink", "fsync-directory"}],
-            ["fsync-directory", "link", "fsync-directory", "unlink", "fsync-directory"],
+            ["fsync-directory", "fsync-directory", "link", "fsync-directory", "unlink", "fsync-directory"],
         )
 
     def test_replace_syncs_the_parent_directory_after_publish(self):
@@ -578,7 +784,7 @@ records.apply_plan(plan)
                     mock.patch.object(records.os, "rename", side_effect=record_rename):
                 records.write_change(root_fd, self.root, change)
 
-        self.assertEqual(events, ["rename", "fsync-directory"])
+        self.assertEqual(events, ["fsync-directory", "rename", "fsync-directory"])
 
     def test_kernel_lock_has_no_release_path_and_blocks_two_followers(self):
         with records.open_root_directory(self.root) as first_fd:
@@ -600,21 +806,25 @@ records.apply_plan(plan)
         outside = self.root / "outside"
         outside.mkdir()
         original_parent = self.root / "docs-original"
-        original_write = records.write_temporary
+        original_assert = records.assert_directory_identity
+        replaced = False
 
-        def replace_parent(parent_fd, path, content, mode):
-            temporary = original_write(parent_fd, path, content, mode)
-            path.parent.rename(original_parent)
-            path.parent.symlink_to(outside, target_is_directory=True)
-            return temporary
+        def replace_parent(path, descriptor):
+            nonlocal replaced
+            if path == change.path.parent and not replaced:
+                replaced = True
+                path.rename(original_parent)
+                path.symlink_to(outside, target_is_directory=True)
+            return original_assert(path, descriptor)
 
         with records.open_root_directory(self.root) as root_fd:
-            with mock.patch.object(records, "write_temporary", side_effect=replace_parent):
+            with mock.patch.object(records, "assert_directory_identity", side_effect=replace_parent):
                 with self.assertRaisesRegex(records.RecordError, "Output parent changed"):
                     records.write_change(root_fd, self.root, change)
 
         self.assertEqual(list(outside.iterdir()), [])
         self.assertEqual(list(original_parent.iterdir()), [])
+        self.assertEqual(list(self.root.glob(".commander-*")), [])
 
     def test_apply_refuses_when_directory_relative_writes_are_unavailable(self):
         plan = self.plan()

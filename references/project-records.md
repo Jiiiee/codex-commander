@@ -63,6 +63,17 @@ The helper:
   the kernel releases the lock when the descriptor closes or the process exits.
   After a filesystem failure, inspect the reported partial state before rerunning.
 
+Crash-residue cleanup is deliberately narrow. On a rerun, the helper automatically
+removes only its newer versioned temporary carriers that match the current plan's
+exact target and content and whose type, owner, link count, age, inode, and content
+prefix remain stable through the anchored checks. Legacy `.commander-<uuid>` files,
+carriers from a different goal/language/level plan, and anything with uncertain
+origin, age, type, path, metadata, or content are left untouched. Inspect those
+items and remove them manually only after confirming that they are disposable.
+The advisory lock coordinates helper users only: a non-cooperating process with
+write access to the same directory can race the final check and deletion, so the
+automatic cleanup is not an atomic guarantee against malicious or external writers.
+
 For files the helper rewrites, its preservation promise is limited to ordinary
 POSIX permission bits (mode bits) where the platform and operation support them.
 Extended attributes, ACLs, filesystem flags, uid, gid, ownership inheritance,

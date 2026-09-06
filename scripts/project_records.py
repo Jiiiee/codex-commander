@@ -7,12 +7,15 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import threading
+import time
 import uuid
 
 try:
@@ -24,6 +27,9 @@ BEGIN = "<!-- codex-commander:begin -->"
 END = "<!-- codex-commander:end -->"
 LEVELS = ("prototype", "maintainable", "production")
 _UMASK_LOCK = threading.Lock()
+_TEMPORARY_PATTERN = re.compile(
+    r"^\.commander-v1-([0-9a-f]{64})-([0-9a-f]{64})-([0-9]{1,20})-([0-9a-f]{32})$"
+)
 
 TEXT = {
     "en": {
@@ -137,10 +143,27 @@ class Change:
 
 
 @dataclass(frozen=True)
+class RootIdentity:
+    st_dev: int
+    st_ino: int
+
+
+@dataclass(frozen=True)
 class Plan:
     root: Path
     changes: tuple[Change, ...]
     warnings: tuple[str, ...]
+    root_identity: RootIdentity
+
+
+def root_identity(path: Path) -> RootIdentity:
+    try:
+        status = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise RecordError(f"Could not verify project root identity: {path}") from exc
+    if not stat.S_ISDIR(status.st_mode):
+        raise RecordError(f"Project root changed while verifying its identity: {path}")
+    return RootIdentity(status.st_dev, status.st_ino)
 
 
 def checked_root(value: str | Path) -> Path:
@@ -233,13 +256,16 @@ def plan_records(root_value: str | Path, language: str, level: str, goal: str) -
     if not goal.strip() or "\x00" in goal:
         raise RecordError("Supply a nonempty goal without NUL characters.")
     root = checked_root(root_value)
+    identity = root_identity(root)
     agents_path, record_path = root / "AGENTS.md", root / "docs" / "commander.md"
     old_agents = read_optional(root, agents_path)
     old_record = read_optional(root, record_path)
     agents = Change(agents_path, old_agents, merge_agents(old_agents, language))
     record = Change(record_path, old_record, old_record if old_record is not None else new_record(language, level, goal.strip()))
     warnings = (TEXT[language]["existing"],) if old_record is not None else ()
-    return Plan(root, (record, agents), warnings)
+    if root_identity(root) != identity:
+        raise RecordError("Project root changed while planning; inspect and retry.")
+    return Plan(root, (record, agents), warnings, identity)
 
 
 def assert_unchanged(root: Path, change: Change) -> None:
@@ -263,8 +289,18 @@ ANCHORED_WRITES_SUPPORTED = (
 )
 
 
+def assert_root_identity(root: Path, descriptor: int, expected: RootIdentity | None = None) -> None:
+    visible = root_identity(root)
+    opened_status = os.fstat(descriptor)
+    opened = RootIdentity(opened_status.st_dev, opened_status.st_ino)
+    if visible != opened:
+        raise RecordError("Project root changed while opening it; inspect and retry.")
+    if expected is not None and opened != expected:
+        raise RecordError("Project root identity changed since preview; inspect and replan.")
+
+
 @contextmanager
-def open_root_directory(root: Path):
+def open_root_directory(root: Path, expected: RootIdentity | None = None):
     if not anchored_writes_supported():
         raise RecordError(
             "Apply requires directory-relative filesystem operations available on macOS/Linux; "
@@ -273,22 +309,27 @@ def open_root_directory(root: Path):
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     descriptor = os.open(root, flags)
     try:
-        visible = os.stat(root, follow_symlinks=False)
-        opened = os.fstat(descriptor)
-        if (visible.st_dev, visible.st_ino) != (opened.st_dev, opened.st_ino):
-            raise RecordError("Project root changed while opening it; inspect and retry.")
+        assert_root_identity(root, descriptor, expected)
         yield descriptor
     finally:
         os.close(descriptor)
 
 
 @contextmanager
-def open_parent_directory(root_fd: int, root: Path, path: Path, create: bool):
+def open_parent_directory(
+    root_fd: int,
+    root: Path,
+    path: Path,
+    create: bool,
+    created: list[tuple[Path, tuple[int, int]]] | None = None,
+):
     relative = path.relative_to(root)
     descriptor = os.dup(root_fd)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current = root
     try:
         for part in relative.parts[:-1]:
+            current = current / part
             try:
                 child = os.open(part, flags, dir_fd=descriptor)
             except FileNotFoundError:
@@ -297,6 +338,9 @@ def open_parent_directory(root_fd: int, root: Path, path: Path, create: bool):
                 os.mkdir(part, 0o777, dir_fd=descriptor)
                 os.fsync(descriptor)
                 child = os.open(part, flags, dir_fd=descriptor)
+                if created is not None:
+                    identity = os.fstat(child)
+                    created.append((current, (identity.st_dev, identity.st_ino)))
             os.close(descriptor)
             descriptor = child
         yield descriptor, relative.name
@@ -348,9 +392,17 @@ def exclusive_apply(root_fd: int, root: Path):
         fcntl.flock(root_fd, fcntl.LOCK_UN)
 
 
+def temporary_name(path: Path, content: bytes, created_ns: int | None = None) -> str:
+    """Name a private carrier so a later run can bind it to one exact change."""
+    path_digest = hashlib.sha256(os.fsencode(path)).hexdigest()
+    content_digest = hashlib.sha256(content).hexdigest()
+    timestamp = time.time_ns() if created_ns is None else created_ns
+    return f".commander-v1-{path_digest}-{content_digest}-{timestamp}-{uuid.uuid4().hex}"
+
+
 def write_temporary(parent_fd: int, path: Path, content: bytes, mode: int | None) -> str:
     for _ in range(100):
-        temporary = f".commander-{uuid.uuid4().hex}"
+        temporary = temporary_name(path, content)
         try:
             if mode is None:
                 # Capture the caller's normal file mode while forcing this carrier
@@ -388,6 +440,7 @@ def write_temporary(parent_fd: int, path: Path, content: bytes, mode: int | None
             handle.flush()
             os.fchmod(handle.fileno(), final_mode)
             os.fsync(handle.fileno())
+        os.fsync(parent_fd)
     except BaseException:
         try:
             os.unlink(temporary, dir_fd=parent_fd)
@@ -398,42 +451,163 @@ def write_temporary(parent_fd: int, path: Path, content: bytes, mode: int | None
     return temporary
 
 
+def _same_file(first: os.stat_result, second: os.stat_result) -> bool:
+    fields = (
+        "st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns",
+    )
+    return all(getattr(first, field, None) == getattr(second, field, None) for field in fields)
+
+
+def cleanup_stale_temporaries(root_fd: int, root: Path, plan: Plan, cutoff_ns: int) -> list[str]:
+    """Remove only carriers whose name, metadata, and bytes prove a current-plan origin."""
+    expected = {
+        (
+            hashlib.sha256(os.fsencode(change.path)).hexdigest(),
+            hashlib.sha256(change.after).hexdigest(),
+        ): change.after
+        for change in plan.changes
+    }
+    removed: list[str] = []
+    assert_directory_identity(root, root_fd)
+    for name in os.listdir(root_fd):
+        match = _TEMPORARY_PATTERN.fullmatch(name)
+        if match is None:
+            continue
+        content = expected.get((match.group(1), match.group(2)))
+        if content is None:
+            continue
+        try:
+            created_ns = int(match.group(3))
+        except ValueError:  # pragma: no cover - excluded by the bounded regex
+            continue
+        identifier = uuid.UUID(hex=match.group(4))
+        if identifier.version != 4 or identifier.variant != uuid.RFC_4122:
+            continue
+        if created_ns <= 0 or created_ns >= cutoff_ns:
+            continue
+        try:
+            visible = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(visible.st_mode):
+            continue
+        if visible.st_uid != os.geteuid() or visible.st_nlink != 1:
+            continue
+        if visible.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
+            continue
+        if visible.st_size > len(content):
+            continue
+        if created_ns > visible.st_mtime_ns or created_ns > visible.st_ctime_ns:
+            continue
+        if visible.st_mtime_ns >= cutoff_ns or visible.st_ctime_ns >= cutoff_ns:
+            continue
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
+        except (FileNotFoundError, OSError):
+            continue
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or not _same_file(visible, opened):
+                continue
+            chunks: list[bytes] = []
+            remaining = len(content) + 1
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            carried = b"".join(chunks)
+            after_read = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if not _same_file(opened, after_read):
+            continue
+        if carried != content[:len(carried)] or len(carried) != opened.st_size:
+            continue
+        try:
+            current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if not _same_file(opened, current):
+            continue
+        os.unlink(name, dir_fd=root_fd)
+        removed.append(name)
+    if removed:
+        os.fsync(root_fd)
+    assert_directory_identity(root, root_fd)
+    return removed
+
+
+def cleanup_created_directories(
+    root_fd: int,
+    root: Path,
+    created: list[tuple[Path, tuple[int, int]]],
+) -> None:
+    """Best-effort rollback for empty parents created by this process invocation."""
+    for path, identity in reversed(created):
+        try:
+            with open_parent_directory(root_fd, root, path, create=False) as (parent_fd, name):
+                visible = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if not stat.S_ISDIR(visible.st_mode) or (visible.st_dev, visible.st_ino) != identity:
+                    continue
+                os.rmdir(name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            # A nonempty, replaced, or otherwise uncertain directory is not ours to remove.
+            continue
+
+
 def write_change(root_fd: int, root: Path, change: Change) -> None:
     check_target(root, change.path)
-    with open_parent_directory(root_fd, root, change.path, create=True) as (parent_fd, name):
-        assert_directory_identity(change.path.parent, parent_fd)
-        assert_unchanged_at(parent_fd, change, name)
-        mode = None
+    mode = None
+    try:
+        with open_parent_directory(root_fd, root, change.path, create=False) as (parent_fd, name):
+            assert_directory_identity(change.path.parent, parent_fd)
+            assert_unchanged_at(parent_fd, change, name)
+            if change.before is not None:
+                mode = stat.S_IMODE(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode)
+    except FileNotFoundError:
         if change.before is not None:
-            mode = stat.S_IMODE(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode)
-        temporary = write_temporary(parent_fd, change.path, change.after, mode)
-        try:
+            raise RecordError(f"Output parent changed during apply: {change.path.parent}")
+
+    # Build and sync the carrier in the already-opened project root. A missing
+    # docs parent is created only after the complete carrier is durable.
+    temporary = write_temporary(root_fd, change.path, change.after, mode)
+    created: list[tuple[Path, tuple[int, int]]] = []
+    try:
+        with open_parent_directory(root_fd, root, change.path, create=True, created=created) as (parent_fd, name):
             assert_directory_identity(change.path.parent, parent_fd)
             assert_unchanged_at(parent_fd, change, name)
             if change.before is None:
                 os.link(
                     temporary,
                     name,
-                    src_dir_fd=parent_fd,
+                    src_dir_fd=root_fd,
                     dst_dir_fd=parent_fd,
                     follow_symlinks=False,
                 )
                 os.fsync(parent_fd)
-                os.unlink(temporary, dir_fd=parent_fd)
+                os.unlink(temporary, dir_fd=root_fd)
                 temporary = None
-                os.fsync(parent_fd)
+                os.fsync(root_fd)
             else:
-                os.rename(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                os.rename(temporary, name, src_dir_fd=root_fd, dst_dir_fd=parent_fd)
                 temporary = None
                 os.fsync(parent_fd)
+                if change.path.parent != root:
+                    os.fsync(root_fd)
             assert_directory_identity(change.path.parent, parent_fd)
-        finally:
-            if temporary is not None:
-                try:
-                    os.unlink(temporary, dir_fd=parent_fd)
-                    os.fsync(parent_fd)
-                except FileNotFoundError:
-                    pass
+    except BaseException:
+        cleanup_created_directories(root_fd, root, created)
+        raise
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=root_fd)
+                os.fsync(root_fd)
+            except FileNotFoundError:
+                pass
 
 
 def apply_plan(plan: Plan) -> list[str]:
@@ -441,10 +615,12 @@ def apply_plan(plan: Plan) -> list[str]:
     try:
         if checked_root(plan.root) != plan.root:
             raise RecordError("Project identity changed since preview.")
-        with open_root_directory(plan.root) as root_fd:
+        with open_root_directory(plan.root, plan.root_identity) as root_fd:
             with exclusive_apply(root_fd, plan.root):
                 for change in plan.changes:
                     assert_unchanged(plan.root, change)
+                assert_root_identity(plan.root, root_fd, plan.root_identity)
+                cleanup_stale_temporaries(root_fd, plan.root, plan, time.time_ns())
                 for change in plan.changes:
                     if change.action != "unchanged":
                         write_change(root_fd, plan.root, change)

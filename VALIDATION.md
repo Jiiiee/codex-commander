@@ -62,11 +62,18 @@ and a kernel advisory lock on supported macOS/Linux systems. Preview remains
 available on platforms without the required primitives, including Windows,
 while apply safely refuses there.
 
+Crash-recovery tests cover the intentionally fail-closed residue boundary: only
+newer carriers for the exact current plan with stable metadata are eligible for
+automatic cleanup. Legacy and different-plan carriers remain for user-confirmed
+manual handling. The kernel lock coordinates helper invocations; it does not make
+the final check-and-delete sequence atomic against non-cooperating writers that
+can modify the same directory.
+
 The bilingual documentation now distinguishes documented support, configured
 CI, and observed local evidence; it also documents local upgrade and
 maintenance boundaries. `RELEASE_NOTES.md` declares version `0.2.0` and the
 intended tag `v0.2.0`. `RELEASE_CHECKSUMS.txt` records SHA-256 values for every
-candidate source file except the checksum manifest itself. The package checker
+release-payload file except the checksum manifest itself. The package checker
 verifies only internal version, file-set, and hash consistency; it does not prove
 source provenance, a local or remote Git tag, a GitHub Release, or resistance to
 malicious tampering.
@@ -91,11 +98,12 @@ stage. The final candidate gate recomputed it from the reviewed candidate; until
 then, the package checker correctly reported manifest drift rather than a clean
 package result.
 
-## Final local-candidate gate
+## Historical pre-COD-38 final local-candidate gate
 
-The final local gate was run on macOS on 2026-09-06 after integrating the
-candidate changes and regenerating `RELEASE_CHECKSUMS.txt` from the resulting
-file set. This is local candidate evidence only. It does not substitute for the
+This historical local gate was run on macOS on 2026-09-06 before COD-38, after
+integrating the then-current candidate and regenerating `RELEASE_CHECKSUMS.txt`
+from its release payload. Its 135-test count is not the current test count. This
+is local candidate evidence only. It does not substitute for the
 required hosted Ubuntu/macOS and Python 3.10–3.13 matrix, independent review,
 remote-tag verification, or GitHub Release verification. Any later integration
 that changes a packaged file requires the release coordinator to rebuild this
@@ -109,13 +117,50 @@ checksum manifest before the final gate is repeated.
 | `python3.12 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
 | `.github/workflows/ci.yml` | Parsed locally and configures eight Ubuntu/macOS and Python 3.10–3.13 jobs; hosted results remain a release gate. |
-| Git candidate state | `VERSION` is `0.2.0`, the checksum manifest matches the candidate file set, and the reviewed worktree is clean. |
+| Git candidate state | `VERSION` was `0.2.0`, the checksum manifest matched that historical release payload, and the reviewed worktree was clean. |
 
 The checksum result establishes internal file-set, version, and hash
 consistency only. The provenance and publication limitations stated above still
 apply.
 
-The package checker's URL portability scan treats an ambiguous wrapped URL
+## COD-38 v0.5 detection-contract local gate (attempt 3)
+
+The v0.5 path-detection contract was implemented and checked locally on macOS
+on 2026-09-07. This evidence is limited to the current working tree: no hosted
+CI, tag, release, push, or remote service was used.
+
+| Check | Observed result |
+| --- | --- |
+| Frozen contract formal copy | The repository copy has pinned SHA-256 `263ef806c44c9c0fc2c526528fe8871c6bdc1ce57e8b00e6cb8a2832d38f52d0`; the regression test reads only this repository copy and has no temporary-host-file dependency. |
+| Independent v0.5 fixture | 60 cases passed through public scanner entry points, covering clauses 2–8, strict UTF-8, POSIX/Windows/UNC paths (including a leafless dual-placeholder UNC), URL components/boundaries and empty ports, arbitrary-length ASCII numeric entities, bounded mixed decoding, source lines, windows, token limits, report priority, and a manifest-listed symbolic link. |
+| Manifest symbolic-link structure check | A checksum-listed symbolic link is rejected before target resolution by both `scan_release_paths()` and `check()`, even when its target is valid UTF-8 and the manifest hash matches the target bytes. |
+| `python3.11 -B -m unittest discover -s tests` | 141 tests passed locally in 136.71 seconds (`time -p` real). |
+| `python3.12 -B -m unittest discover -s tests` | 141 tests passed locally in 135.70 seconds (`time -p` real). |
+| Work counters at 131,072 and 262,144 characters | Work was 1,731,600 and 3,519,060 characters (ratio 2.0323); maximum states 3, depth 2, and window 16,384. |
+| Package and supporting local gates | The package check, fixture JSON parse, runner list/dry-run, checksum verification, and local skill validation passed. |
+
+The checksum manifest is the complete scan set for the release payload, not an
+inventory of every repository review artifact. The frozen contract document is
+retained verbatim as required review evidence outside that payload because it
+necessarily contains literal reject examples. The independently executable JSON
+fixture is part of the release payload and checksum set; its encoded source
+spelling prevents fixture data from masquerading as an accidental machine-path
+leak while JSON decoding restores the exact runtime inputs. The package's
+file-set check explicitly asserts this one review-evidence boundary.
+
+Attempt 2 also evaluated replacing the historical
+`contains_machine_specific_path` implementation with a direct `scan_text`
+compatibility adapter. The old implementation and its supporting parser occupy
+755 source lines (lines 38–792 in this snapshot); direct substitution produced
+970 failing subtests across 48 legacy test methods because that API deliberately
+implements pre-v0.5 wrapper/residual rules, including out-of-scope behavior.
+Removing it safely therefore requires a separate migration: classify the legacy
+cases against v0.5, move any still-required public behavior into the independent
+fixture, update callers, and then delete the old parser and its private-helper
+tests as one reviewed change. COD-38 keeps the legacy API unchanged rather than
+silently changing those callers.
+
+The historical pre-COD-38 package checker treated an ambiguous wrapped URL
 followed by bounded, interleaved residual tokens and structural separators that
 lead to `token=machine-path` as unsafe and fails closed. This is a deliberate
 safety boundary: network paths that would otherwise be ambiguous should use an
@@ -124,11 +169,11 @@ explicit Markdown link or autolink form. Residual scanning applies separate
 derived from the three-layer percent-decoding limit; truncation, incomplete
 tokens, invalid escapes, and exhausted decode depth also fail closed.
 
-The final scanner gate additionally covers repeated and alternating wrapper
+That historical scanner gate additionally covered repeated and alternating wrapper
 closers, wrapper openers, paired punctuation, braces, and bounded HTML entities
 as grammar-derived document evidence in both raw and percent-decoded residuals.
-The committed regression suite exercises those cross-category combinations as
-part of the 135 tests reported above, together with explicit-link and benign URI
+The historical regression suite exercises those cross-category combinations as
+part of the 135-test pre-COD-38 snapshot reported above, together with explicit-link and benign URI
 token controls. Its maximum/overflow and linear-work assertions are also part of
 that reproducible candidate suite.
 

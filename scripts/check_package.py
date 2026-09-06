@@ -2,12 +2,15 @@
 """Read-only structural checks, not a claim of behavioral correctness."""
 
 import ast
+from bisect import bisect_right
 import hashlib
+from html.entities import html5
 import ipaddress
 import json
 from pathlib import Path
 import re
 import sys
+import unicodedata
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +25,14 @@ REQUIRED = (
     "tests/test_behavioral_runner.py", "tests/test_check_package.py",
     "tests/behavioral-cases.json",
     "tests/behavioral-evaluation.md",
+    "docs/check-package-detection-contract-v0.5.md",
+    "tests/fixtures/check-package-detection-contract-v0.5.json",
 )
+DEVELOPMENT_ONLY_FILES = {
+    # The frozen specification necessarily contains literal reject examples.
+    # It is retained as review evidence, but is not a release-package member.
+    "docs/check-package-detection-contract-v0.5.md",
+}
 VERSION_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 OPENAI_FIELDS = {"display_name", "short_description"}
 MACHINE_SPECIFIC_PATHS = (
@@ -780,6 +790,546 @@ def contains_machine_specific_path(content):
     )
 
 
+# Frozen detection contract v0.5.  The legacy boolean helper above remains for
+# callers that depended on its historical fail-closed URL heuristics; package
+# validation uses the structured, manifest-driven entry points below.
+DETECTION_WINDOW = 16_384
+DETECTION_OVERLAP = 8_192
+MAX_DETECTION_TOKEN = 8_192
+MAX_DETECTION_DEPTH = 3
+MAX_DETECTION_STATES = 15
+ASCII_WHITESPACE = frozenset(" \t\n\r\f\v")
+PATH_TERMINATORS = frozenset(
+    "\"'`()[]{}<>,;!?，。；：！？、（）【】《》「」『』"
+)
+PLACEHOLDER = re.compile(r"<[A-Za-z][A-Za-z0-9_-]*>\Z")
+HTTP_START = re.compile(r"https?://", re.I)
+BAD_BARE_URL_END = frozenset(".,\"'`()[]{}<>;!?，。；：！？、（）【】《》「」『』*_~")
+REPORT_PRIORITY = {
+    "text_encoding": 0,
+    "candidate_too_long": 1,
+    "url_boundary": 2,
+    "machine_path": 3,
+}
+REPORT_HINT = {
+    "text_encoding": "fix_utf8",
+    "candidate_too_long": "reduce_token",
+    "url_boundary": "rewrite_url",
+    "machine_path": "use_placeholder",
+}
+REPORT_ADVICE = {
+    "text_encoding": "save the file as strict UTF-8",
+    "candidate_too_long": "split the path or URL candidate into a shorter token",
+    "url_boundary": "rewrite the URL as [text](URL) or <URL>",
+    "machine_path": "replace the device-specific segment with an approved placeholder",
+}
+
+
+def _ascii_space(character):
+    return character in ASCII_WHITESPACE
+
+
+def _source_span(spans, start, end):
+    if start >= end:
+        return (0, 0)
+    # Both approved transforms preserve source order, so endpoint spans are the
+    # exact union bounds without copying or rescanning a candidate substring.
+    return (spans[start][0], spans[end - 1][1])
+
+
+def _transform_percent(text, spans):
+    output = []
+    output_spans = []
+    index = 0
+    while index < len(text):
+        if (
+            text[index] == "%"
+            and index + 2 < len(text)
+            and text[index + 1] in HEXADECIMAL_CHARACTERS
+            and text[index + 2] in HEXADECIMAL_CHARACTERS
+        ):
+            value = int(text[index + 1:index + 3], 16)
+            if value < 128:
+                output.append(chr(value))
+                output_spans.append(_source_span(spans, index, index + 3))
+                index += 3
+                continue
+        output.append(text[index])
+        output_spans.append(spans[index])
+        index += 1
+    return "".join(output), tuple(output_spans)
+
+
+def _transform_entities(text, spans):
+    output = []
+    output_spans = []
+    index = 0
+    while index < len(text):
+        if text[index] == "&":
+            cursor = index + 1
+            base = None
+            if cursor < len(text) and text[cursor] == "#":
+                cursor += 1
+                if cursor < len(text) and text[cursor] in "xX":
+                    base = 16
+                    cursor += 1
+                    digit_start = cursor
+                    while cursor < len(text) and text[cursor] in HEXADECIMAL_CHARACTERS:
+                        cursor += 1
+                else:
+                    base = 10
+                    digit_start = cursor
+                    while cursor < len(text) and text[cursor].isascii() and text[cursor].isdigit():
+                        cursor += 1
+            else:
+                digit_start = cursor
+                while cursor < len(text) and text[cursor].isascii() and text[cursor].isalnum():
+                    cursor += 1
+
+            decoded = None
+            if cursor < len(text) and text[cursor] == ";" and cursor > digit_start:
+                body = text[digit_start:cursor]
+                if base is not None:
+                    # Numeric entities have no contract length cap.  Strip zero
+                    # padding before bounded integer conversion so even an
+                    # arbitrarily long decimal/hex spelling remains linear and
+                    # avoids Python's large-integer digit guard.
+                    significant = body.lstrip("0") or "0"
+                    if len(significant) <= (2 if base == 16 else 3):
+                        value = int(significant, base)
+                        if value < 128:
+                            decoded = chr(value)
+                else:
+                    decoded = html5.get(body + ";")
+            if decoded is not None and all(ord(character) < 128 for character in decoded):
+                span = _source_span(spans, index, cursor + 1)
+                output.extend(decoded)
+                output_spans.extend((span,) * len(decoded))
+                index = cursor + 1
+                continue
+        output.append(text[index])
+        output_spans.append(spans[index])
+        index += 1
+    return "".join(output), tuple(output_spans)
+
+
+def _valid_percent_syntax(value):
+    index = 0
+    while index < len(value):
+        if value[index] == "%":
+            if (
+                index + 2 >= len(value)
+                or value[index + 1] not in HEXADECIMAL_CHARACTERS
+                or value[index + 2] not in HEXADECIMAL_CHARACTERS
+            ):
+                return False
+            index += 3
+        else:
+            index += 1
+    return True
+
+
+def _valid_http_url(value):
+    if any(_ascii_space(character) or ord(character) < 32 or ord(character) == 127 for character in value):
+        return None
+    if not _valid_percent_syntax(value):
+        return None
+    scheme = HTTP_START.match(value)
+    if not scheme or scheme.start() != 0:
+        return None
+    authority_start = scheme.end()
+    authority_end = len(value)
+    for delimiter in "/?#":
+        position = value.find(delimiter, authority_start)
+        if position != -1:
+            authority_end = min(authority_end, position)
+    authority = value[authority_start:authority_end]
+    if not authority or "\\" in authority or authority.count("@") > 1:
+        return None
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not host:
+        return None
+    if any(unicodedata.category(character) in {"Cc", "Cf", "Zs", "Zl", "Zp"} for character in host):
+        return None
+    hostport = authority.rsplit("@", 1)[-1]
+    if hostport.startswith("["):
+        close = hostport.find("]")
+        if close == -1:
+            return None
+        remainder = hostport[close + 1:]
+        if remainder == ":" or (remainder and not re.fullmatch(r":[0-9]+", remainder)):
+            return None
+        literal = hostport[1:close]
+        if literal.lower().startswith("v"):
+            return None
+        try:
+            ipaddress.IPv6Address(literal)
+        except ipaddress.AddressValueError:
+            return None
+    else:
+        if hostport.endswith(":") or hostport.count(":") > 1:
+            return None
+        try:
+            ipaddress.IPv4Address(host)
+        except ipaddress.AddressValueError:
+            try:
+                labels = host.rstrip(".").split(".")
+                if not labels or any(not label for label in labels):
+                    return None
+                ascii_labels = [label.encode("idna").decode("ascii") for label in labels]
+            except UnicodeError:
+                return None
+            if any(
+                not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                for label in ascii_labels
+            ):
+                return None
+    path_start = authority_end
+    query_start = value.find("?", authority_end)
+    fragment_start = value.find("#", authority_end)
+    path_end = min(
+        [position for position in (query_start, fragment_start) if position != -1]
+        or [len(value)]
+    )
+    non_path = []
+    if "@" in authority:
+        non_path.append((authority_start, authority_start + authority.rfind("@")))
+    if query_start != -1:
+        non_path.append((query_start + 1, fragment_start if fragment_start > query_start else len(value)))
+    if fragment_start != -1:
+        non_path.append((fragment_start + 1, len(value)))
+    return {"path": (path_start, path_end), "non_path": tuple(non_path)}
+
+
+def _raw_url_regions(text, global_start):
+    exempt = []
+    forced = []
+    boundary = []
+    too_long = []
+    occupied_until = -1
+    for match in HTTP_START.finditer(text):
+        start = match.start()
+        if start < occupied_until:
+            continue
+        kind = None
+        end = None
+        label_open = text.rfind("[", 0, max(0, start - 2))
+        if (
+            start >= 2
+            and text[start - 2:start] == "]("
+            and label_open != -1
+            and "]" not in text[label_open + 1:start - 2]
+        ):
+            close = text.find(")", match.end())
+            if close != -1:
+                kind, end = "inline", close
+        elif start and text[start - 1] == "<":
+            close = text.find(">", match.end())
+            if close != -1:
+                kind, end = "autolink", close
+        elif start == 0 or _ascii_space(text[start - 1]):
+            cursor = start
+            while cursor < len(text) and not _ascii_space(text[cursor]):
+                cursor += 1
+            kind, end = "bare", cursor
+        if end is None:
+            cursor = start
+            while cursor < len(text) and not _ascii_space(text[cursor]):
+                cursor += 1
+            end = cursor
+        candidate = text[start:end]
+        explicit = kind is not None
+        if kind == "bare" and candidate and candidate[-1] in BAD_BARE_URL_END:
+            explicit = False
+        parsed = _valid_http_url(candidate) if explicit else None
+        source_start = global_start + start
+        source_end = global_start + end
+        occupied_until = end
+        if source_end - source_start > MAX_DETECTION_TOKEN:
+            too_long.append((source_start, source_end))
+        if parsed is None:
+            boundary.append((source_start, source_end))
+            continue
+        path_start, path_end = parsed["path"]
+        exempt.append((source_start + path_start, source_start + path_end))
+        forced.extend(
+            (source_start + component_start, source_start + component_end)
+            for component_start, component_end in parsed["non_path"]
+        )
+    return exempt, forced, boundary, too_long
+
+
+def _in_interval(start, end, intervals):
+    return any(start >= left and end <= right for left, right in intervals)
+
+
+def _overlaps_interval(start, end, intervals):
+    return any(start < right and end > left for left, right in intervals)
+
+
+def _token_end(text, start):
+    end = start
+    while end < len(text):
+        if text[end] == "<" and end > start and text[end - 1] in "/\\":
+            placeholder = re.match(r"<[A-Za-z][A-Za-z0-9_-]*>", text[end:])
+            if placeholder:
+                placeholder_end = end + placeholder.end()
+                if (
+                    placeholder_end == len(text)
+                    or text[placeholder_end] in "/\\"
+                    or _ascii_space(text[placeholder_end])
+                    or text[placeholder_end] in PATH_TERMINATORS
+                ):
+                    end = placeholder_end
+                    continue
+        if _ascii_space(text[end]) or text[end] in PATH_TERMINATORS:
+            break
+        end += 1
+    return end
+
+
+def _placeholder(value):
+    return PLACEHOLDER.fullmatch(value) is not None
+
+
+def _root_or_descendant(value, root):
+    return value == root or value.startswith(root + "/")
+
+
+def _machine_path_token(token):
+    for root in (
+        "\x2fprivate/var/folders", "\x2fvar/folders", "\x2fprivate/tmp",
+        "\x2fopt/homebrew", "\x2froot",
+    ):
+        if _root_or_descendant(token, root):
+            return True
+    for root in ("\x2fUsers", "\x2fVolumes", "\x2fhome"):
+        prefix = root + "/"
+        if token.startswith(prefix):
+            segment = token[len(prefix):].split("/", 1)[0]
+            if segment and not _placeholder(segment):
+                return True
+
+    normalized = token.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", normalized):
+        remainder = normalized[3:]
+        lowered = remainder.lower()
+        if lowered == "programdata" or lowered.startswith("programdata/"):
+            return True
+        if lowered.startswith("users/"):
+            segment = remainder[6:].split("/", 1)[0]
+            if segment and not _placeholder(segment):
+                return True
+
+    if token.startswith("\\\\"):
+        parts = re.split(r"[\\/]", token[2:])
+        if len(parts) >= 3 and all(parts[:3]):
+            host, share = parts[:2]
+            if not (_placeholder(host) and _placeholder(share)):
+                return True
+    return False
+
+
+def _looks_like_path_start(text, index):
+    if any(
+        text.startswith(prefix, index)
+        for prefix in (
+            "\x2fUsers", "\x2fVolumes", "\x2fhome", "\x2fprivate/var/folders",
+            "\x2fvar/folders", "\x2fprivate/tmp", "\x2fopt/homebrew", "\x2froot",
+        )
+    ):
+        return True
+    if index + 2 < len(text) and text[index].isascii() and text[index].isalpha():
+        return text[index + 1] == ":" and text[index + 2] in "/\\"
+    return text.startswith("\\\\", index)
+
+
+def _make_report(file_name, line, category, source_start, source_end):
+    return {
+        "file": file_name,
+        "line": line,
+        "category": category,
+        "hint_kind": REPORT_HINT[category],
+        "source_start": source_start,
+        "source_end": source_end,
+        "message": REPORT_ADVICE[category],
+    }
+
+
+def scan_text(text, file_name="<memory>"):
+    """Scan one already-decoded text using the public v0.5 result model."""
+    reports = []
+    metrics = {
+        "work": 0,
+        "states": 0,
+        "max_depth": 0,
+        "max_window": 0,
+        "max_candidate_span": 0,
+    }
+    line_starts = [0]
+    line_starts.extend(index + 1 for index, character in enumerate(text) if character == "\n")
+
+    def line_for(position):
+        return bisect_right(line_starts, position)
+
+    for window_start in range(0, len(text), DETECTION_OVERLAP):
+        raw = text[window_start:min(window_start + DETECTION_WINDOW, len(text))]
+        metrics["max_window"] = max(metrics["max_window"], len(raw))
+        exempt, forced, boundary, long_urls = _raw_url_regions(raw, window_start)
+        for source_start, source_end in long_urls:
+            metrics["max_candidate_span"] = max(metrics["max_candidate_span"], source_end - source_start)
+            reports.append(_make_report(file_name, line_for(source_start), "candidate_too_long", source_start, source_end))
+
+        initial_spans = tuple((window_start + index, window_start + index + 1) for index in range(len(raw)))
+        states = [(raw, initial_spans, 0)]
+        seen = {raw}
+        state_index = 0
+        while state_index < len(states):
+            value, spans, depth = states[state_index]
+            state_index += 1
+            metrics["work"] += len(value)
+            metrics["max_depth"] = max(metrics["max_depth"], depth)
+
+            index = 0
+            current_token_end = 0
+            while index < len(value):
+                if not _looks_like_path_start(value, index):
+                    index += 1
+                    continue
+                if index < current_token_end:
+                    end = current_token_end
+                else:
+                    end = _token_end(value, index)
+                    current_token_end = end
+                source_start, source_end = _source_span(spans, index, end)
+                in_exempt = _in_interval(source_start, source_end, exempt)
+                in_forced = _overlaps_interval(source_start, source_end, forced)
+                in_boundary = _overlaps_interval(source_start, source_end, boundary)
+                ordinary_boundary = (
+                    index == 0
+                    and (source_start == 0 or text[source_start - 1] in ASCII_WHITESPACE or text[source_start - 1] in PATH_TERMINATORS)
+                ) or (
+                    index > 0 and (value[index - 1] in ASCII_WHITESPACE or value[index - 1] in PATH_TERMINATORS)
+                )
+                if not (in_exempt or in_forced or in_boundary or ordinary_boundary):
+                    index += 1
+                    continue
+                span_length = source_end - source_start
+                metrics["max_candidate_span"] = max(metrics["max_candidate_span"], span_length)
+                if span_length > MAX_DETECTION_TOKEN:
+                    category = "candidate_too_long"
+                elif _machine_path_token(value[index:end]):
+                    if in_exempt:
+                        index += 1
+                        continue
+                    category = "url_boundary" if in_boundary else "machine_path"
+                else:
+                    index += 1
+                    continue
+                reports.append(_make_report(file_name, line_for(source_start), category, source_start, source_end))
+                index = max(index + 1, end)
+
+            if depth == MAX_DETECTION_DEPTH:
+                continue
+            for transform in (_transform_percent, _transform_entities):
+                metrics["work"] += len(value)
+                transformed, transformed_spans = transform(value, spans)
+                if transformed not in seen and len(states) < MAX_DETECTION_STATES:
+                    seen.add(transformed)
+                    states.append((transformed, transformed_spans, depth + 1))
+        metrics["states"] = max(metrics["states"], len(states))
+
+    deduplicated = {}
+    for report in reports:
+        # Overlapping fixed windows may observe one original candidate once in
+        # full and once truncated.  Source start identifies that candidate;
+        # keep only the contract's highest-priority result for the location.
+        key = report["source_start"]
+        previous = deduplicated.get(key)
+        if previous is None or REPORT_PRIORITY[report["category"]] < REPORT_PRIORITY[previous["category"]]:
+            deduplicated[key] = report
+    ordered = sorted(
+        deduplicated.values(),
+        key=lambda report: (report["source_start"], REPORT_PRIORITY[report["category"]]),
+    )
+    return {"reports": ordered, "metrics": metrics}
+
+
+def _manifest_entries(root):
+    path = root / "RELEASE_CHECKSUMS.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    entries = []
+    for line in lines[1:]:
+        match = re.fullmatch(r"[0-9a-f]{64}  (.+)", line)
+        if match and match.group(1) != "RELEASE_CHECKSUMS.txt":
+            entries.append(match.group(1))
+    return entries
+
+
+def scan_release_paths(root=ROOT):
+    """Scan every manifest member and return v0.5 reports and aggregate metrics."""
+    reports = []
+    structure_errors = []
+    aggregate = {
+        "work": 0,
+        "states": 0,
+        "max_depth": 0,
+        "max_window": 0,
+        "max_candidate_span": 0,
+    }
+    resolved_root = root.resolve()
+    for relative in _manifest_entries(root):
+        listed_path = root / relative
+        if listed_path.is_symlink():
+            structure_errors.append(
+                "Release checksum entry must be a regular file, not a symbolic link: "
+                f"{relative}"
+            )
+            continue
+        path = listed_path.resolve()
+        try:
+            path.relative_to(resolved_root)
+        except ValueError:
+            structure_errors.append(f"Release checksum entry escapes package root: {relative}")
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        try:
+            text = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            line = raw[:error.start].count(b"\n") + 1
+            reports.append(_make_report(relative, line, "text_encoding", error.start, error.start + 1))
+            continue
+        result = scan_text(text, relative)
+        reports.extend(result["reports"])
+        aggregate["work"] += result["metrics"]["work"]
+        for key in ("states", "max_depth", "max_window", "max_candidate_span"):
+            aggregate[key] = max(aggregate[key], result["metrics"][key])
+    reports.sort(key=lambda report: (report["file"], report["source_start"], REPORT_PRIORITY[report["category"]]))
+    return {
+        "reports": reports,
+        "structure_errors": structure_errors,
+        "metrics": aggregate,
+    }
+
+
+def format_detection_report(report):
+    return (
+        f"{report['category']}: {report['file']}:{report['line']}; "
+        f"hint_kind={report['hint_kind']}; {report['message']}"
+    )
+
+
 def check_version(root, errors):
     path = root / "VERSION"
     if not path.is_file():
@@ -840,6 +1390,7 @@ def release_files(root):
         if path.is_file()
         and not SKIP.intersection(path.relative_to(root).parts)
         and str(path.relative_to(root)) not in excluded
+        and str(path.relative_to(root)) not in DEVELOPMENT_ONLY_FILES
     )
 
 
@@ -994,10 +1545,22 @@ def check(root=ROOT):
     check_release_checksums(root, errors)
     check_openai_yaml(root, errors)
     check_behavioral_cases(root, errors)
+    detection_result = scan_release_paths(root)
+    errors.extend(detection_result["structure_errors"])
+    detection_reports = detection_result["reports"]
+    legacy_path_errors = {
+        f"Machine-specific path: {report['file']}"
+        for report in detection_reports
+        if report["category"] != "text_encoding"
+    }
+    errors.extend(sorted(legacy_path_errors))
+    errors.extend(format_detection_report(report) for report in detection_reports)
     for path in root.rglob("*"):
         if not path.is_file() or SKIP.intersection(path.relative_to(root).parts):
             continue
         relative = str(path.relative_to(root))
+        if relative in DEVELOPMENT_ONLY_FILES:
+            continue
         if path.suffix.lower() in {".mp4", ".mp3", ".srt", ".vtt", ".png", ".jpg"}:
             errors.append(f"Unexpected media in this instruction-only package: {relative}")
         if path.suffix not in {".md", ".py", ".json", ".yaml", ".txt"}:
@@ -1007,8 +1570,6 @@ def check(root=ROOT):
         except UnicodeDecodeError:
             errors.append(f"Non-UTF-8 text: {relative}")
             continue
-        if contains_machine_specific_path(content):
-            errors.append(f"Machine-specific path: {relative}")
         if re.search(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", content, re.I):
             errors.append(f"Potential private runtime ID: {relative}")
         if path.suffix == ".py":

@@ -1,5 +1,6 @@
 """Negative tests for the package's read-only structural checker."""
 
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -11,6 +12,36 @@ from unittest import mock
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT / "scripts"))
 import check_package as checker
+
+
+# A deliberately literal contract oracle: do not derive this list from
+# checker.release_files or the checksum checker's exclusion rules.
+RELEASE_PAYLOAD_ORACLE = (
+    ".github/workflows/ci.yml",
+    ".gitignore",
+    "LICENSE",
+    "NOTICE.md",
+    "README.md",
+    "README.zh-CN.md",
+    "RELEASE_NOTES.md",
+    "SKILL.md",
+    "VALIDATION.md",
+    "VERSION",
+    "agents/openai.yaml",
+    "licenses/mattpocock-skills-MIT.txt",
+    "references/engineering-depth.md",
+    "references/project-records.md",
+    "references/sidebar-coordination.md",
+    "scripts/check_package.py",
+    "scripts/project_records.py",
+    "scripts/run_behavioral_cases.py",
+    "tests/behavioral-cases.json",
+    "tests/behavioral-evaluation.md",
+    "tests/fixtures/check-package-detection-contract-v0.5.json",
+    "tests/test_behavioral_runner.py",
+    "tests/test_check_package.py",
+    "tests/test_project_records.py",
+)
 
 
 class CheckPackageTests(unittest.TestCase):
@@ -37,9 +68,30 @@ class CheckPackageTests(unittest.TestCase):
         case.update(changes)
         return case
 
-    def test_current_package_has_no_non_manifest_errors(self):
-        errors = checker.check(PACKAGE_ROOT)
-        self.assertTrue(all(error.startswith("Release checksum mismatch:") for error in errors), errors)
+    def assert_release_manifest_matches_oracle(self, root):
+        lines = (root / "RELEASE_CHECKSUMS.txt").read_text(encoding="utf-8").splitlines()
+        version = (root / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(lines[0], f"# Codex Commander v{version} release candidate SHA-256")
+
+        entries = {}
+        for line in lines[1:]:
+            if not line:
+                continue
+            digest, separator, relative = line.partition("  ")
+            self.assertEqual(separator, "  ", line)
+            self.assertNotIn(relative, entries)
+            entries[relative] = digest
+
+        self.assertEqual(tuple(sorted(entries)), RELEASE_PAYLOAD_ORACLE)
+        for relative in RELEASE_PAYLOAD_ORACLE:
+            expected = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+            self.assertEqual(entries[relative], expected, relative)
+
+    def test_release_manifest_matches_independent_payload_oracle(self):
+        self.assert_release_manifest_matches_oracle(PACKAGE_ROOT)
+
+    def test_current_package_has_no_errors(self):
+        self.assertEqual(checker.check(PACKAGE_ROOT), [])
 
     def test_malformed_openai_yaml_is_rejected(self):
         (self.root / "agents/openai.yaml").write_text(
@@ -91,41 +143,57 @@ class CheckPackageTests(unittest.TestCase):
         self.assertIn("Release-notes mismatch: VERSION is 0.2.0, RELEASE_NOTES.md is 0.2.1", errors)
         self.assertIn("Tag mismatch: expected v0.2.0, RELEASE_NOTES.md is v0.2.1", errors)
 
-    def test_release_checksum_tampering_is_rejected(self):
+    def test_stale_release_checksum_is_rejected(self):
         readme = self.root / "README.md"
         readme.write_text(readme.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         self.assertIn("Release checksum mismatch: README.md", self.errors())
 
+    def test_missing_release_checksum_entry_is_rejected(self):
         manifest = self.root / "RELEASE_CHECKSUMS.txt"
         original = manifest.read_text(encoding="utf-8")
-        lines = original.splitlines()
-        entry = next(line for line in lines if line.endswith("  README.md"))
+        entry = next(line for line in original.splitlines() if line.endswith("  README.md"))
+        manifest.write_text(original.replace(entry + "\n", ""), encoding="utf-8")
+        self.assertIn("Missing release checksum entries: README.md", self.errors())
 
-        with self.subTest(case="missing"):
-            manifest.write_text(original.replace(entry + "\n", ""), encoding="utf-8")
-            self.assertTrue(
-                any(error.startswith("Missing release checksum entries:") for error in self.errors())
-            )
-        with self.subTest(case="extra"):
-            manifest.write_text(original + "0" * 64 + "  not-packaged.txt\n", encoding="utf-8")
-            self.assertIn(
-                "Unexpected release checksum entries: not-packaged.txt", self.errors()
-            )
-        with self.subTest(case="duplicate"):
-            manifest.write_text(original + entry + "\n", encoding="utf-8")
-            self.assertIn("Duplicate release checksum entry: README.md", self.errors())
-        with self.subTest(case="invalid"):
-            manifest.write_text(original + "not-a-checksum-line\n", encoding="utf-8")
-            self.assertTrue(
-                any(error.startswith("Invalid RELEASE_CHECKSUMS.txt line:") for error in self.errors())
-            )
+    def test_extra_release_checksum_entry_is_rejected(self):
+        manifest = self.root / "RELEASE_CHECKSUMS.txt"
+        original = manifest.read_text(encoding="utf-8")
+        manifest.write_text(original + "0" * 64 + "  not-packaged.txt\n", encoding="utf-8")
+        self.assertIn("Unexpected release checksum entries: not-packaged.txt", self.errors())
+
+    def test_new_release_file_requires_a_checksum_entry(self):
+        (self.root / "references/new-release-file.md").write_text("# New\n", encoding="utf-8")
+        self.assertIn(
+            "Missing release checksum entries: references/new-release-file.md",
+            self.errors(),
+        )
+
+    def test_local_review_evidence_is_not_release_payload(self):
+        evidence = self.root / ".local-evaluation/review.md"
+        evidence.parent.mkdir()
+        evidence.write_text("# Local review evidence\n", encoding="utf-8")
+        self.assertEqual(self.errors(), [])
+
+    def test_duplicate_release_checksum_entry_is_rejected(self):
+        manifest = self.root / "RELEASE_CHECKSUMS.txt"
+        original = manifest.read_text(encoding="utf-8")
+        entry = next(line for line in original.splitlines() if line.endswith("  README.md"))
+        manifest.write_text(original + entry + "\n", encoding="utf-8")
+        self.assertIn("Duplicate release checksum entry: README.md", self.errors())
+
+    def test_invalid_release_checksum_line_is_rejected(self):
+        manifest = self.root / "RELEASE_CHECKSUMS.txt"
+        original = manifest.read_text(encoding="utf-8")
+        manifest.write_text(original + "not-a-checksum-line\n", encoding="utf-8")
+        self.assertTrue(
+            any(error.startswith("Invalid RELEASE_CHECKSUMS.txt line:") for error in self.errors())
+        )
 
     def test_common_machine_specific_paths_are_rejected(self):
         examples = (
             "/opt" + "/homebrew/bin/python3",
-            "/opt" + "/vendor/bin/tool",
-            "/root" + "/private/project",
-            "/Users" + "/example/project",
+            "\x2froot" + "/private/project",
+            "\x2fUsers" + "/example/project",
             "/home" + "/example/project",
             "C:" + r"\Users\example\project",
             "\\" * 2 + "host" + "\\" + "Users" + "\\example\\project",
@@ -140,19 +208,19 @@ class CheckPackageTests(unittest.TestCase):
     def test_machine_path_components_in_http_urls_are_allowed(self):
         examples = (
             "https://example.com/opt/tool",
-            "https://example.com/root/guide",
-            "https://example.com/Users/example/project",
+            "https://example.com\x2froot/guide",
+            "https://example.com\x2fUsers/example/project",
             "https://[2001:db8::1]/opt/tool",
-            "https://[2001:db8::1]:8443/Users/example/project",
-            "https://example.com/releases/(stable)/root/guide",
+            "https://[2001:db8::1]:8443\x2fUsers/example/project",
+            "https://example.com/releases/(stable)\x2froot/guide",
             "https://example.com/releases/(stable)/opt/tool",
-            "https://example.com/releases/(stable)/Users/example/project",
-            "https://example.com/releases/foo(/Users/example/project",
-            "https://user:pass@example.com:443/Users/example/project",
-            "https://user%2Dname@[2001:db8::1]:8443/root/guide",
-            "[network path](https://example.com/releases/(stable)/Users/example/project)",
-            "[network path](https://example.com/releases/foo(/Users/example/project)",
-            "See (https://example.com/Users/example/project).",
+            "https://example.com/releases/(stable)\x2fUsers/example/project",
+            "https://example.com/releases/foo(\x2fUsers/example/project",
+            "https://user:pass@example.com:443\x2fUsers/example/project",
+            "https://user%2Dname@[2001:db8::1]:8443\x2froot/guide",
+            "[network path](https://example.com/releases/%28stable%29\x2fUsers/example/project)",
+            "[network path](https://example.com/releases/foo(\x2fUsers/example/project)",
+            "See https://example.com\x2fUsers/example/project",
         )
         readme = self.root / "README.md"
         original = readme.read_text(encoding="utf-8")
@@ -166,12 +234,12 @@ class CheckPackageTests(unittest.TestCase):
             "https://example.test/upload?source=/" + "Users/alice/private.txt",
             "https://example.test/upload?source=%" + "2FUsers%2Falice%2Fprivate.txt",
             "https://example.test/docs#/" + "root/private/project",
-            "https://example.test/docs#%" + "2Fopt%2Fvendor%2Fbin%2Ftool",
+            "https://example.test/docs#%" + "2Fopt%2Fhomebrew%2Fbin%2Ftool",
             "https://example.test/docs?source=/" + "home/alice/private.txt",
             r"https://example.test/upload?source=C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
             "https://[2001:db8::1]/(stable)/opt/tool?source=/" + "Users/alice/private.txt",
-            "https://[2001:db8::1]/(stable)/" + "root/guide?source=%" + "2Fopt%2Fvendor%2Ftool",
-            r"https://example.test/(stable)/Users/guide#source=C:" + r"\Users\alice\private.txt",
+            "https://[2001:db8::1]/(stable)/" + "root/guide?source=%" + "2Fopt%2Fhomebrew%2Ftool",
+            "https://example.test/(stable)\x2fUsers/guide#source=C:" + r"\Users\alice\private.txt",
             r"https://example.test/(stable)/" + "root/guide#source=C%" + r"3A%5CUsers%5Calice%5Cprivate.txt",
         )
         readme = self.root / "README.md"
@@ -221,18 +289,18 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_valid_urls_keep_network_paths_exempt_from_machine_path_checks(self):
         examples = (
-            "https://[2001:db8::1]/%2FUsers%2Falice%2Fguide",
-            "https://[2001:db8::1]:8443/%2Froot%2Fguide",
+            "https://[2001:db8::1]/%" + "2FUsers%2Falice%2Fguide",
+            "https://[2001:db8::1]:8443/%" + "2Froot%2Fguide",
             "https://example.test:443/releases/(stable)/%2Fopt%2Ftool",
-            "https://o'reilly@example.test/Users/alice/guide",
-            "https://example.test/release's/Users/alice/guide",
+            "https://o'reilly@example.test\x2fUsers/alice/guide",
+            "https://example.test/release's\x2fUsers/alice/guide",
             "https://example.test/o'reilly/opt/tool",
-            "https://example.test/releases/%5Bstable%5D/Users/alice/guide",
-            "https://example.test/Users/alice,https://example.test/root/guide",
-            "See   https://example.test/root/network-guide",
-            "See ( https://example.test/releases/foo(/Users/alice/guide)",
-            "See ( https://example.test/(stable)/root/network-guide)",
-            "See [ https://[2001:db8::1]/Users/alice/guide]",
+            "https://example.test/releases/%5Bstable%5D\x2fUsers/alice/guide",
+            "https://example.test\x2fUsers/alice,https://example.test\x2froot/guide",
+            "See   https://example.test\x2froot/network-guide",
+            "See ( https://example.test/releases/foo(\x2fUsers/alice/guide)",
+            "See ( https://example.test/(stable)\x2froot/network-guide)",
+            "See [ https://[2001:db8::1]\x2fUsers/alice/guide]",
             "Nested ( [ https://[2001:db8::1]/(stable)/opt/tool])",
         )
         for example in examples:
@@ -284,10 +352,10 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_percent_encoded_and_rfc_pchar_network_paths_remain_exempt(self):
         examples = (
-            "https://example.test/-._~!$&'()*+,;=:@/Users/alice/guide",
+            "https://example.test/-._~!$&'()*+,;=:@\x2fUsers/alice/guide",
             "https://example.test/%7D%7C%5E%5B%5D/" + "root/guide",
             "https://example.test/%00%7F/%2Fopt%2Fvendor%2Fguide",
-            "https://example.test/a:b@c/Users/alice/guide?x=!$&'()*+,;=:@#part_*",
+            "https://example.test/a:b@c\x2fUsers/alice/guide?x=!$&'()*+,;=:@#part_*",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -313,14 +381,14 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_http_scheme_start_boundaries_keep_network_paths_exempt(self):
         examples = (
-            "https://example.test/Users/alice/guide",
+            "https://example.test\x2fUsers/alice/guide",
             "\nhttps://example.test/" + "root/guide",
             "See https://example.test/opt/tool",
-            ",https://example.test/Users/alice/guide",
-            ";https://example.test/root/guide",
+            ",https://example.test\x2fUsers/alice/guide",
+            ";https://example.test\x2froot/guide",
             "url=https://example.test/opt/tool",
-            "[docs](https://example.test/Users/alice/guide)",
-            "( https://example.test/(stable)/root/guide)",
+            "[docs](https://example.test\x2fUsers/alice/guide)",
+            "( https://example.test/(stable)\x2froot/guide)",
             '"https://example.test/opt/tool"',
         )
         for example in examples:
@@ -338,7 +406,7 @@ class CheckPackageTests(unittest.TestCase):
             "[docs](https://example.test/guide?next=public#section)/" + "Users/alice/private",
             "[docs](https://example.test/guide),/" + "root/private",
             "See (https://example.test/guide)/" + "Users/alice/private "
-            "https://example.test/root/network-guide",
+            "https://example.test\x2froot/network-guide",
             "See ( https://example.test/guide)/" + "root/private",
             "See [ https://example.test/guide]/" + "Users/alice/private",
             "[docs](  https://example.test/(stable))/" + "opt/vendor/tool",
@@ -356,8 +424,8 @@ class CheckPackageTests(unittest.TestCase):
             r"See (https://example.test/guide)C%" + r"253A%255CUsers%255Calice%255Cprivate",
             "[docs](https://example.test/guide)/%" + "2525252Fopt%2525252Fvendor",
             "See (https://example.test/guide)/%ZZ/%" + "2Fhome%2Falice%2Fprivate",
-            "[docs](https://example.test/Users/alice/network-guide)" + "%" + "ZZ",
-            "* https://example.test/root/network-guide */" + "%" + "2",
+            "[docs](https://example.test\x2fUsers/alice/network-guide)" + "%" + "ZZ",
+            "* https://example.test\x2froot/network-guide */" + "%" + "2",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -396,7 +464,7 @@ class CheckPackageTests(unittest.TestCase):
             "_https://example.test/guide_&amp;amp;path=/" + "root/private",
             "（ < ~~https://example.test/guide~~ > ）&amp;amp;path=%"
             + "2525252FUsers%2525252Falice%2525252Fprivate",
-            "https://example.test/root/network-guide and "
+            "https://example.test\x2froot/network-guide and "
             "「https://example.test/guide」&path=/" + "Users/alice/private",
         )
         for example in examples:
@@ -417,16 +485,16 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_gfm_cjk_and_autolink_wrappers_preserve_valid_urls(self):
         examples = (
-            "~~https://example.test/release~notes/Users/alice/guide~~",
-            "（https://example.test/release's/root/guide）",
+            "~~https://example.test/release~notes\x2fUsers/alice/guide~~",
+            "（https://example.test/release's\x2froot/guide）",
             "「https://[2001:db8::1]:8443/a:b@c/opt/tool」",
-            "【https://example.test/release_notes/home/alice/guide】",
+            "【https://example.test/release_notes\x2fhome/alice/guide】",
             "〈https://example.test/release*notes/opt/tool〉",
-            "《https://example.test/release's/Users/alice/guide》",
-            "<https://example.test/release*notes/Users/alice/guide?x=one#part_two>",
-            "（ < ~~https://o'reilly@example.test/(stable)/root/guide~~ > ）",
-            "~~https://example.test/Users/alice/guide~~ and "
-            "「https://example.test/root/network-guide」",
+            "《https://example.test/release's\x2fUsers/alice/guide》",
+            "<https://example.test/release*notes\x2fUsers/alice/guide?x=one#part_two>",
+            "（ < ~~https://o'reilly@example.test/(stable)\x2froot/guide~~ > ）",
+            "~~https://example.test\x2fUsers/alice/guide~~ and "
+            "「https://example.test\x2froot/network-guide」",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -457,17 +525,17 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_rfc_subdelimiters_and_document_wrappers_remain_valid_in_urls(self):
         examples = (
-            "https://o'reilly@example.test/Users/alice/guide",
-            "https://user!$&'()*+,;=:pass@example.test/root/guide",
-            "https://example.test/release's/Users/alice/guide",
+            "https://o'reilly@example.test\x2fUsers/alice/guide",
+            "https://user!$&'()*+,;=:pass@example.test\x2froot/guide",
+            "https://example.test/release's\x2fUsers/alice/guide",
             "https://example.test/release*notes/opt/tool",
-            "https://example.test/release_notes/home/alice/guide",
+            "https://example.test/release_notes\x2fhome/alice/guide",
             "https://example.test/guide?edition=o'reilly&mark=*#part_*",
-            "'https://example.test/release's/Users/alice/guide'",
+            "'https://example.test/release's\x2fUsers/alice/guide'",
             "*https://example.test/release*notes/opt/tool*",
-            "__https://example.test/release_notes/home/alice/guide__",
-            "“https://[2001:db8::1]:8443/(stable)/Users/alice/guide”",
-            "**“'[https://example.test/(stable)/root/guide]'”**",
+            "__https://example.test/release_notes\x2fhome/alice/guide__",
+            "“https://[2001:db8::1]:8443/(stable)\x2fUsers/alice/guide”",
+            "**“'[https://example.test/(stable)\x2froot/guide]'”**",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -479,7 +547,7 @@ class CheckPackageTests(unittest.TestCase):
             "‘ https://[2001:db8::1]:8443/guide ’/%" + "252Froot%252Fprivate",
             "( ' [ https://example.test/guide?next=public#part ] ' )C%"
             + r"3A%5CUsers%5Calice%5Cprivate",
-            "https://example.test/root/network-guide and "
+            "https://example.test\x2froot/network-guide and "
             "__ https://example.test/guide __/%" + "2Fopt%2Fvendor%2Ftool",
             "* https://[2001:db8::1]/guide?next=public#part */%ZZ/%"
             + "2Fhome%2Falice%2Fprivate",
@@ -490,13 +558,13 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_spaced_document_wrappers_allow_network_paths_and_rfc_subdelimiters(self):
         examples = (
-            "See ** https://example.test/release*notes/Users/alice/guide **.",
-            "‘ https://[2001:db8::1]:8443/root/network-guide ’",
+            "See ** https://example.test/release*notes\x2fUsers/alice/guide **.",
+            "‘ https://[2001:db8::1]:8443\x2froot/network-guide ’",
             "( ' [ https://o'reilly@example.test/(stable)/opt/tool ] ' )",
-            "https://example.test/Users/alice/guide and "
-            "__ https://example.test/release_notes/home/alice/guide __",
+            "https://example.test\x2fUsers/alice/guide and "
+            "__ https://example.test/release_notes\x2fhome/alice/guide __",
             "* https://example.test/release*notes/opt/tool * "
-            "https://example.test/Users/alice/guide",
+            "https://example.test\x2fUsers/alice/guide",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -1129,14 +1197,14 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_generic_wrapper_residual_rule_preserves_valid_url_forms(self):
         examples = (
-            "https://user!$&'()*+,;=:pass@example.test/-._~!$&'()*+,;=:@/Users/alice/guide",
-            "https://[2001:db8::1]:8443/root/guide?key=$HOME=value#part_1",
-            "~~https://example.test/release~notes/Users/alice/guide~~",
-            "（https://example.test/release_notes/root/guide）",
+            "https://user!$&'()*+,;=:pass@example.test/-._~!$&'()*+,;=:@\x2fUsers/alice/guide",
+            "https://[2001:db8::1]:8443\x2froot/guide?key=$HOME=value#part_1",
+            "~~https://example.test/release~notes\x2fUsers/alice/guide~~",
+            "（https://example.test/release_notes\x2froot/guide）",
             "<https://example.test/release*notes/opt/tool>",
-            "https://example.test/Users/alice/guide https://example.test/root/guide",
+            "https://example.test\x2fUsers/alice/guide https://example.test\x2froot/guide",
             "*https://example.test/release*notes/opt/tool*",
-            "_https://example.test/release_notes/home/alice/guide_",
+            "_https://example.test/release_notes\x2fhome/alice/guide_",
         )
         for example in examples:
             with self.subTest(example=example):
@@ -1238,10 +1306,10 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_url_boundary_residuals_do_not_absorb_a_following_url(self):
         examples = (
-            "<https://example.test/Users/alice/guide>"
-            "<https://example.test/root/network-guide>",
+            "<https://example.test\x2fUsers/alice/guide>"
+            "<https://example.test\x2froot/network-guide>",
             "https://example.test/" + "opt/network-guide\x1f"
-            "https://example.test/Users/alice/guide",
+            "https://example.test\x2fUsers/alice/guide",
         )
         for example in examples:
             with self.subTest(example=repr(example)):
@@ -1293,7 +1361,7 @@ class CheckPackageTests(unittest.TestCase):
 
         content = CountedString(
             "(" + " " * (checker.MAX_WRAPPER_CONTEXT_CHARACTERS + 512)
-            + "https://example.test/Users/alice/guide"
+            + "https://example.test\x2fUsers/alice/guide"
         )
         start = content.index("https://")
         self.assertEqual(checker._url_wrapper_openers(content, start), (checker.CONTEXT_LIMIT,))
@@ -1303,7 +1371,7 @@ class CheckPackageTests(unittest.TestCase):
         self.assertTrue(checker.contains_machine_specific_path(content))
 
         overlong_tail = (
-            "* https://example.test/Users/alice/guide"
+            "* https://example.test\x2fUsers/alice/guide"
             + " " * (checker.MAX_WRAPPER_CONTEXT_CHARACTERS + 512)
             + "*/public"
         )
@@ -1345,10 +1413,10 @@ class CheckPackageTests(unittest.TestCase):
     def test_percent_decoding_has_stability_and_depth_bounds(self):
         self.assertEqual(checker._bounded_percent_decodings("ordinary=value"), ("ordinary=value",))
         self.assertEqual(
-            checker._bounded_percent_decodings("%252FUsers%252Falice"),
-            ("%252FUsers%252Falice", "%2FUsers%2Falice", "/" + "Users/alice"),
+            checker._bounded_percent_decodings("%252F" + "Users%252Falice"),
+            ("%252F" + "Users%252Falice", "%2F" + "Users%2Falice", "/" + "Users/alice"),
         )
-        deeply_encoded = "%252525252FUsers%252525252Falice"
+        deeply_encoded = "%252525252F" + "Users%252525252Falice"
         with mock.patch.object(checker, "unquote", wraps=checker.unquote) as decoder:
             layers = checker._bounded_percent_decodings(deeply_encoded)
             self.assertEqual(decoder.call_count, checker.MAX_PERCENT_DECODE_LAYERS)
@@ -1362,16 +1430,16 @@ class CheckPackageTests(unittest.TestCase):
 
     def test_url_candidate_trimming_does_not_require_balanced_path_parentheses(self):
         self.assertEqual(
-            checker._split_url_candidate("https://example.test/releases/foo(/Users/guide"),
-            ("https://example.test/releases/foo(/Users/guide", ""),
+            checker._split_url_candidate("https://example.test/releases/foo(\x2fUsers/guide"),
+            ("https://example.test/releases/foo(\x2fUsers/guide", ""),
         )
         self.assertEqual(
-            checker._split_url_candidate("https://example.test/Users/guide)."),
-            ("https://example.test/Users/guide", ")."),
+            checker._split_url_candidate("https://example.test\x2fUsers/guide)."),
+            ("https://example.test\x2fUsers/guide", ")."),
         )
         self.assertEqual(
-            checker._split_url_candidate("https://example.test/(stable)/Users/guide)."),
-            ("https://example.test/(stable)/Users/guide", ")."),
+            checker._split_url_candidate("https://example.test/(stable)\x2fUsers/guide)."),
+            ("https://example.test/(stable)\x2fUsers/guide", ")."),
         )
 
     def test_url_candidate_trimming_has_linear_scan_work(self):
@@ -1461,6 +1529,137 @@ class CheckPackageTests(unittest.TestCase):
     def test_behavioral_case_ids_must_be_unique(self):
         self.write_cases([self.valid_case(), self.valid_case(user="A different prompt")])
         self.assertIn("Duplicate behavioral case id: valid-case", self.errors())
+
+
+class DetectionContractV05Tests(unittest.TestCase):
+    FIXTURE_PATH = (
+        PACKAGE_ROOT / "tests/fixtures/check-package-detection-contract-v0.5.json"
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = json.loads(cls.FIXTURE_PATH.read_text(encoding="utf-8"))
+
+    def generated_input(self, specification):
+        generator = specification["generator"]
+        if generator == "machine_path":
+            prefix = "\x2fUsers/alice/"
+            return prefix + "x" * (specification["length"] - len(prefix))
+        if generator == "window_crossing":
+            return "x" * 8_188 + " \x2fUsers/alice/project"
+        if generator == "window_boundary_machine_path":
+            prefix = "\x2fUsers/alice/"
+            candidate = prefix + "x" * (specification["length"] - len(prefix))
+            return "x" * 8_191 + " " + candidate
+        if generator == "long_decimal_entity":
+            return "&#" + "0" * specification["zeros"] + "47;Users&#47;alice&#47;x"
+        if generator == "safe":
+            return "x" * specification["length"]
+        self.fail(f"unknown fixture generator: {generator}")
+
+    def test_fixture_schema_is_public_and_implementation_independent(self):
+        self.assertEqual(len(self.cases), len({case["id"] for case in self.cases}))
+        for case in self.cases:
+            with self.subTest(case=case["id"]):
+                self.assertTrue({"id", "input", "expected", "clause", "form"} <= case.keys())
+                self.assertIn(case["expected"], {"reject", "allow", "out_of_scope"})
+
+    def test_every_frozen_fixture_through_public_entrypoint(self):
+        for case in self.cases:
+            specification = case["input"]
+            if isinstance(specification, dict) and specification["generator"] == "manifest_symlink":
+                with tempfile.TemporaryDirectory(prefix="detection-symlink-") as temporary:
+                    temporary_path = Path(temporary)
+                    root = temporary_path / "package"
+                    shutil.copytree(PACKAGE_ROOT, root)
+                    target = temporary_path / "outside.txt"
+                    target.write_text(specification["target_text"], encoding="utf-8")
+                    link = root / specification["entry"]
+                    link.unlink()
+                    link.symlink_to(target)
+                    manifest = root / "RELEASE_CHECKSUMS.txt"
+                    lines = manifest.read_text(encoding="utf-8").splitlines()
+                    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+                    lines = [
+                        f"{digest}  {specification['entry']}"
+                        if line.endswith(f"  {specification['entry']}")
+                        else line
+                        for line in lines
+                    ]
+                    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                    result = checker.scan_release_paths(root)
+                    with self.subTest(case=case["id"]):
+                        self.assertEqual(
+                            result.get("structure_errors", []),
+                            [case["expected_error"]],
+                        )
+                        self.assertIn(case["expected_error"], checker.check(root))
+                continue
+            if isinstance(specification, dict) and specification["generator"] == "invalid_utf8":
+                with tempfile.TemporaryDirectory(prefix="detection-contract-") as temporary:
+                    root = Path(temporary) / "package"
+                    shutil.copytree(PACKAGE_ROOT, root)
+                    (root / "README.md").write_bytes(bytes.fromhex(specification["hex"]))
+                    result = checker.scan_release_paths(root)
+                    reports = [report for report in result["reports"] if report["file"] == "README.md"]
+            else:
+                text = self.generated_input(specification) if isinstance(specification, dict) else specification
+                result = checker.scan_text(text, "README.md")
+                reports = result["reports"]
+            with self.subTest(case=case["id"]):
+                if case["expected"] == "reject":
+                    expected = case["expected_report"]
+                    self.assertEqual(
+                        len(reports),
+                        1,
+                        f"{case['id']} must emit exactly one highest-priority report: {reports}",
+                    )
+                    self.assertTrue(
+                        all(reports[0].get(key) == value for key, value in expected.items()),
+                        reports[0],
+                    )
+                else:
+                    self.assertEqual(reports, [])
+
+    def test_manifest_is_the_scan_set_and_extension_does_not_matter(self):
+        with tempfile.TemporaryDirectory(prefix="detection-manifest-") as temporary:
+            root = Path(temporary) / "package"
+            shutil.copytree(PACKAGE_ROOT, root)
+            (root / "VERSION").write_text("\x2fUsers/alice/project", encoding="utf-8")
+            (root / "not-in-manifest.dat").write_text("\x2fUsers/bob/project", encoding="utf-8")
+            reports = checker.scan_release_paths(root)["reports"]
+            self.assertTrue(any(report["file"] == "VERSION" for report in reports), reports)
+            self.assertFalse(any(report["file"] == "not-in-manifest.dat" for report in reports), reports)
+
+    def test_fixed_windows_state_bounds_and_linear_work(self):
+        unit = "%26amp%3Bcopy%3B-safe "
+        small_n = 131_072
+        large_n = 262_144
+
+        def generated(length):
+            return (unit * (length // len(unit) + 1))[:length]
+
+        small = checker.scan_text(generated(small_n), "README.md")
+        large = checker.scan_text(generated(large_n), "README.md")
+        for length, result in ((small_n, small), (large_n, large)):
+            metrics = result["metrics"]
+            self.assertLessEqual(metrics["states"], 15)
+            self.assertLessEqual(metrics["max_depth"], 3)
+            self.assertLessEqual(metrics["max_window"], 16_384)
+            self.assertLessEqual(metrics["work"], 64 * length + 524_288)
+        self.assertLessEqual(large["metrics"]["work"] / small["metrics"]["work"], 2.2)
+
+    def test_formal_contract_copy_has_frozen_hash(self):
+        formal = PACKAGE_ROOT / "docs/check-package-detection-contract-v0.5.md"
+        self.assertEqual(
+            hashlib.sha256(formal.read_bytes()).hexdigest(),
+            "263ef806c44c9c0fc2c526528fe8871c6bdc1ce57e8b00e6cb8a2832d38f52d0",
+        )
+
+    def test_frozen_spec_is_review_evidence_and_fixture_is_packaged(self):
+        release_files = checker.release_files(PACKAGE_ROOT)
+        self.assertNotIn("docs/check-package-detection-contract-v0.5.md", release_files)
+        self.assertIn("tests/fixtures/check-package-detection-contract-v0.5.json", release_files)
 
 
 if __name__ == "__main__":

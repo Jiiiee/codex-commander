@@ -5,14 +5,13 @@ import io
 import json
 import os
 from pathlib import Path
-import re
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
-from urllib.parse import unquote, urlsplit
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -20,33 +19,19 @@ sys.path.insert(0, str(PACKAGE_ROOT / "scripts"))
 import run_behavioral_cases as runner
 
 
-MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
+PACKAGED_SKILL_SNAPSHOT = (
+    "SKILL.md",
+    "NOTICE.md",
+    "references/engineering-depth.md",
+    "references/project-records.md",
+    "references/sidebar-coordination.md",
+    "licenses/mattpocock-skills-MIT.txt",
+)
 
 
-def local_markdown_targets(source):
-    content = source.read_text(encoding="utf-8")
-    for match in MARKDOWN_LINK.finditer(content):
-        parsed = urlsplit(match.group("target").strip("<>"))
-        if parsed.scheme or parsed.netloc or not parsed.path:
-            continue
-        yield source.parent / unquote(parsed.path)
-
-
-def expected_skill_snapshot():
-    package_root = PACKAGE_ROOT.resolve()
-    pending = [package_root / "SKILL.md"]
-    expected = {}
-    while pending:
-        source = pending.pop(0).resolve(strict=True)
-        relative = source.relative_to(package_root)
-        if str(relative) in expected:
-            continue
-        if not source.is_file():
-            raise AssertionError(f"test package link is not a file: {relative}")
-        expected[str(relative)] = source.read_bytes().hex()
-        if source.suffix.lower() == ".md":
-            pending.extend(local_markdown_targets(source))
-    return expected
+def literal_snapshot_bytes(root, paths):
+    """Build expected bytes from an explicit manifest, never from link discovery."""
+    return {relative: (root / relative).read_bytes() for relative in paths}
 
 
 class BehavioralRunnerTests(unittest.TestCase):
@@ -133,25 +118,19 @@ print(json.dumps({"request": request, "cwd": os.getcwd()}, ensure_ascii=False))
 
     def test_real_evaluator_reads_complete_isolated_skill_snapshot(self):
         self.write_cases("skill-source")
-        required_paths = {
-            "SKILL.md",
-            "NOTICE.md",
-            "references/engineering-depth.md",
-            "references/project-records.md",
-            "references/sidebar-coordination.md",
-            "licenses/mattpocock-skills-MIT.txt",
+        expected_content = {
+            relative: content.hex()
+            for relative, content in literal_snapshot_bytes(
+                PACKAGE_ROOT, PACKAGED_SKILL_SNAPSHOT
+            ).items()
         }
-        expected_content = expected_skill_snapshot()
-        self.assertTrue(required_paths <= expected_content.keys())
         forbidden_root = str(PACKAGE_ROOT.resolve())
         evaluator = rf"""
 import json
 import os
 from pathlib import Path
-import re
 import stat
 import sys
-from urllib.parse import unquote, urlsplit
 
 request = json.load(sys.stdin)
 skill_path = Path(request["skill"])
@@ -162,19 +141,6 @@ actual = {{
     for path in Path.cwd().rglob("*")
     if path.is_file()
 }}
-markdown_link = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
-checked_links = []
-for markdown_path in sorted(Path.cwd().rglob("*.md")):
-    content = markdown_path.read_text(encoding="utf-8")
-    for match in markdown_link.finditer(content):
-        parsed = urlsplit(match.group("target").strip("<>"))
-        if parsed.scheme or parsed.netloc or not parsed.path:
-            continue
-        target = markdown_path.parent / unquote(parsed.path)
-        relative = str(target.resolve(strict=True).relative_to(Path.cwd()))
-        assert target.is_file()
-        assert target.read_bytes().hex() == expected[relative]
-        checked_links.append((str(markdown_path.relative_to(Path.cwd())), relative))
 modes = {{
     relative: stat.S_IMODE(Path(relative).stat().st_mode) for relative in actual
 }}
@@ -195,7 +161,6 @@ print(json.dumps({{
     "cwd": os.getcwd(),
     "files": sorted(actual),
     "modes": modes,
-    "checkedLinks": checked_links,
     "environmentLeaks": environment_leaks,
 }}))
 """
@@ -213,12 +178,46 @@ print(json.dumps({{
         response = json.loads(result["response"])
         self.assertEqual(response["path"], "SKILL.md")
         self.assertEqual(set(response["files"]), set(expected_content))
-        self.assertTrue(response["checkedLinks"])
         self.assertTrue(all(mode == 0o444 for mode in response["modes"].values()))
         self.assertEqual(response["environmentLeaks"], [])
         evaluator_cwd = Path(response["cwd"])
         self.assertNotEqual(evaluator_cwd, PACKAGE_ROOT)
         self.assertFalse(evaluator_cwd.exists())
+
+    def test_skill_snapshot_matches_literal_nested_fixture_and_file_modes(self):
+        package = self.root / "package"
+        snapshot = self.root / "snapshot"
+        fixture = {
+            "SKILL.md": b"[guide](references/guide.md)\n[payload](assets/payload.bin)\n",
+            "references/guide.md": b"[details](nested/details.md)\n",
+            "references/nested/details.md": b"[notice](../../NOTICE.md#terms)\n",
+            "NOTICE.md": b"# Terms\nfixture notice\n",
+            "assets/payload.bin": b"binary\x00\xff[not traversed](hidden.md)\n",
+        }
+        unreferenced = {
+            "assets/hidden.md": b"must not be staged\n",
+            "unreferenced.md": b"must not be staged\n",
+        }
+        for relative, content in {**fixture, **unreferenced}.items():
+            path = package / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+        with mock.patch.object(runner, "SKILL_SOURCE", package / "SKILL.md"):
+            runner.stage_skill_snapshot(snapshot)
+
+        actual = {
+            str(path.relative_to(snapshot)): path.read_bytes()
+            for path in snapshot.rglob("*")
+            if path.is_file()
+        }
+        modes = {
+            str(path.relative_to(snapshot)): stat.S_IMODE(path.stat().st_mode)
+            for path in snapshot.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(actual, fixture)
+        self.assertEqual(modes, dict.fromkeys(fixture, 0o444))
 
     def test_skill_snapshot_follows_local_files_regardless_of_extension(self):
         package = self.root / "package"
@@ -258,6 +257,7 @@ print(json.dumps({{
         cases = {
             "directory": "[bad](directory)",
             "escape": "[bad](../outside.txt)",
+            "encoded-escape": "[bad](%2E%2E/outside.txt)",
             "missing": "[bad](missing.txt)",
             "invalid-percent": "[bad](bad%ZZ.txt)",
             "invalid-utf8": "[bad](bad%FF.txt)",
