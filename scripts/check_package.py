@@ -25,7 +25,8 @@ VERSION_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][
 OPENAI_FIELDS = {"display_name", "short_description"}
 MACHINE_SPECIFIC_PATHS = (
     re.compile(r"/(?:Users|Volumes|home)/[^\s`'\"<>()\[\]]+"),
-    re.compile(r"/(?:opt/homebrew|private/(?:var|tmp)|var/folders)/[^\s`'\"<>()\[\]]+"),
+    re.compile(r"/(?:opt|root)/[^\s`'\"<>()\[\]]+"),
+    re.compile(r"/(?:private/(?:var|tmp)|var/folders)/[^\s`'\"<>()\[\]]+"),
     re.compile(r"[A-Za-z]:[\\\\/](?:Users|ProgramData|home)[\\\\/][^\s`'\"<>()\[\]]+"),
     re.compile(r"\\\\[^\\\\/\s]+\\(?:Users|ProgramData|home)\\[^\s`'\"<>()\[\]]+"),
 )

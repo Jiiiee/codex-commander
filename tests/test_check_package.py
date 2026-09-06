@@ -122,6 +122,8 @@ class CheckPackageTests(unittest.TestCase):
     def test_common_machine_specific_paths_are_rejected(self):
         examples = (
             "/opt" + "/homebrew/bin/python3",
+            "/opt" + "/vendor/bin/tool",
+            "/root" + "/private/project",
             "/Users" + "/example/project",
             "C:" + r"\Users\example\project",
             "\\" * 2 + "host" + "\\" + "Users" + "\\example\\project",
@@ -132,6 +134,12 @@ class CheckPackageTests(unittest.TestCase):
             with self.subTest(example=example):
                 readme.write_text(original + "\n" + example + "\n", encoding="utf-8")
                 self.assertIn("Machine-specific path: README.md", self.errors())
+
+    def test_documented_generic_tmp_path_is_allowed(self):
+        readme = self.root / "README.md"
+        example = "/tmp/codex-commander-behavioral-results.json"
+        readme.write_text(readme.read_text(encoding="utf-8") + "\n" + example + "\n", encoding="utf-8")
+        self.assertNotIn("Machine-specific path: README.md", self.errors())
 
     def test_behavioral_cases_must_be_a_nonempty_array(self):
         for cases in ({"id": "not-an-array"}, []):
