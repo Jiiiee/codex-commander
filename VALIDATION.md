@@ -1,6 +1,24 @@
 # Validation status
 
-Version: 0.2.0. Date: 2026-09-06.
+Version: 0.2.0. Date: 2026-09-07.
+
+## Hosted CI evidence and current-candidate boundary
+
+GitHub Actions run `34072191750` completed successfully for earlier candidate
+`46437a7074ba6febb4ddb85a06259f17119bf988`: all eight Ubuntu/macOS × Python
+3.10–3.13 jobs succeeded. This is hosted execution evidence for that exact SHA,
+not merely a configured matrix.
+
+The documentation changes recorded here create a later candidate. It has not
+been pushed or run in hosted CI by this record, so it still requires a successful
+Ubuntu/macOS × Python 3.10–3.13 hosted run for its own pushed SHA. Verify that
+future result in GitHub PR/Actions and the external Taskboard record; do not
+transfer the earlier SHA's result to it.
+
+Ubuntu is established only for the earlier same-SHA automated matrix. Windows
+execution, real-model behavior, and complete sidebar recovery remain
+unestablished. Local checks and packaged behavioral cases do not establish any
+of those boundaries.
 
 ## Historical automated-check snapshot (pre-integration)
 
@@ -45,12 +63,14 @@ remote tag and a GitHub Release must be verified separately.
 | `python3.11 -B scripts/check_package.py` | Passed. |
 | `python3.12 -B -m unittest discover -s tests -v` | 61 tests passed. |
 | `python3.12 -B scripts/check_package.py` | Passed. |
-| `.github/workflows/ci.yml` | Configures Ubuntu and macOS targets for Python 3.10–3.13. No GitHub-hosted workflow execution was observed or is claimed. |
+| `.github/workflows/ci.yml` | This earlier local snapshot only established configuration for Ubuntu and macOS × Python 3.10–3.13; it predates the later hosted evidence for SHA `46437a7074ba6febb4ddb85a06259f17119bf988`. |
 
 Python 3.10–3.13 are configured targets. This historical record contains local
-evidence only for 3.11 and 3.12. Python 3.9 is not a supported version even if
-an invocation happens to run. See the README compatibility matrix for the
-distinction between declared support, configured CI, and observed local evidence.
+evidence only for 3.11 and 3.12. The later hosted evidence is separately scoped
+to SHA `46437a7074ba6febb4ddb85a06259f17119bf988`. Python 3.9 is not a supported
+version even if an invocation happens to run. See the README compatibility matrix
+for the distinction between declared support, configured CI, and observed local
+and hosted evidence.
 
 ## Version 0.2.0: automated quality and safe record writes
 
@@ -116,7 +136,7 @@ checksum manifest before the final gate is repeated.
 | `python3.11 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | `python3.12 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
-| `.github/workflows/ci.yml` | Parsed locally and configures eight Ubuntu/macOS and Python 3.10–3.13 jobs; hosted results remain a release gate. |
+| `.github/workflows/ci.yml` | Parsed locally and configures eight Ubuntu/macOS × Python 3.10–3.13 jobs. The later hosted success for SHA `46437a7074ba6febb4ddb85a06259f17119bf988` is recorded above; a later candidate still needs an own-SHA hosted result. |
 | Git candidate state | `VERSION` was `0.2.0`, the checksum manifest matched that historical release payload, and the reviewed worktree was clean. |
 
 The checksum result establishes internal file-set, version, and hash
@@ -351,7 +371,7 @@ host tests before unattended use. Raw local probe outputs are not distributed.
 - Exactly-once delivery, crash-safe transactions, or external/non-cooperating
   record writers that do not follow the helper's kernel advisory lock.
 - Lower token cost, faster completion, or universally improved output quality.
-- Windows/Linux execution testing or exhaustive support for other languages.
+- Windows execution testing or exhaustive support for other languages.
 
 See [the evaluation procedure](tests/behavioral-evaluation.md) for the distinction
 between file-operation tests and agent/runtime validation.

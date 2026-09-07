@@ -10,8 +10,9 @@ and must be verified in their respective services.
 
 ## Highlights
 
-- Adds GitHub Actions coverage for Python 3.10–3.13 on Ubuntu and
-  macOS. The workflow is configured but no hosted run is claimed.
+- Adds GitHub Actions coverage for Python 3.10–3.13 on Ubuntu and macOS.
+  Historical GitHub Actions run `34072191750` completed all eight jobs for
+  earlier candidate `46437a7074ba6febb4ddb85a06259f17119bf988` successfully.
 - Adds a 13-case behavioral runner with list, dry-run, selected-case, and
   machine-readable result modes.
 - Hardens project-record writes with directory-relative file descriptors,
@@ -29,8 +30,10 @@ and must be verified in their respective services.
 - The skill itself remains instruction-first and has no runtime dependency
   beyond the Python standard library used by its optional helpers and tests.
 - Python 3.10–3.13 is the documented range; Python 3.9 is unsupported even if
-  it happens to run locally. Local verification covers Python
-  3.11 and 3.12 on macOS; configured CI targets are not reported as completed.
+  it happens to run locally. Local verification covers Python 3.11 and 3.12 on
+  macOS; the earlier candidate has the hosted Ubuntu/macOS × Python 3.10–3.13
+  evidence above. Windows execution, real-model behavior, and complete sidebar
+  recovery remain unestablished.
 - Project-record preview is portable. Apply requires the directory-relative and
   advisory-lock primitives available on supported macOS/Linux systems and
   safely refuses on Windows or other platforms without them.
@@ -39,8 +42,11 @@ and must be verified in their respective services.
 
 ## Verification
 
-- Local verification results are recorded in [VALIDATION.md](VALIDATION.md);
-  configured CI targets are not evidence of a completed hosted run.
+- Local and historical hosted verification results are recorded in
+  [VALIDATION.md](VALIDATION.md). The historical hosted result applies only to
+  `46437a7074ba6febb4ddb85a06259f17119bf988`; this later candidate still needs
+  a successful hosted run for its own pushed SHA, verified externally in GitHub
+  PR/Actions and the Taskboard record.
 - The behavioral runner lists 13 packaged cases; dry-run records all 13 without
   launching case commands.
 - `git diff --check` passes.

@@ -90,9 +90,15 @@ ln -s "$PWD" ~/.agents/skills/codex-commander
 | 3.13 | 属于当前支持范围。 | Ubuntu 与 macOS。 | 本工作树尚未记录。 |
 | 后续小版本 | 未审阅前不声明支持。 | 未明确加入前不配置。 | 无。 |
 
-仓库中的 GitHub Actions 工作流已为表中的 CI 目标配置，但此处不宣称它已经在 GitHub
-托管环境运行。配置矩阵不是运行证据；确切本机命令和历史结果见
-[VALIDATION.md](VALIDATION.md)。
+仓库中的 GitHub Actions 工作流已为表中的 CI 目标配置。较早候选
+`46437a7074ba6febb4ddb85a06259f17119bf988` 有托管历史证据：GitHub Actions
+run `34072191750` 的 Ubuntu/macOS × Python 3.10–3.13 八个任务均成功。配置矩阵本身
+不是运行证据，且该运行不能证明较晚候选的结果。本次文档更新产生的候选仍须在推送后为其
+自身 SHA 取得托管运行；应在 GitHub PR/Actions 与 Taskboard 外部记录中核验该结果。确切
+本机命令和历史结果见 [VALIDATION.md](VALIDATION.md)。
+
+Ubuntu 已有该同 SHA 自动化证据。Windows 执行、真实模型行为和完整侧边栏恢复仍未建立；
+不得从本机检查、托管矩阵或打包的行为用例推断它们已经成立。
 
 本地复制安装和符号链接安装都采用“先审阅、后变更”的方式，不是自动更新渠道。升级时，
 先检查实际使用的技能目录入口以及它是目录还是链接；在独立位置准备并比较候选源码；

@@ -99,9 +99,19 @@ configuration file is not mistaken for a completed hosted run:
 | Future minor versions | Not declared until reviewed. | None until added deliberately. | None. |
 
 The repository's GitHub Actions workflow is configured for the listed CI
-targets, but no GitHub-hosted run is claimed here. A configured matrix is not
-execution evidence; see [VALIDATION.md](VALIDATION.md) for the exact local
-commands and historical results.
+targets. Historical hosted evidence exists for the earlier candidate
+`46437a7074ba6febb4ddb85a06259f17119bf988`: GitHub Actions run `34072191750`
+completed all eight Ubuntu/macOS × Python 3.10–3.13 jobs successfully. A
+configured matrix is not itself execution evidence, and that run does not
+establish results for a later candidate. The candidate produced by this
+documentation update still needs a hosted run for its own pushed SHA; verify
+that result in GitHub PR/Actions and the external Taskboard record. See
+[VALIDATION.md](VALIDATION.md) for the exact local commands and historical
+results.
+
+Ubuntu has this same-SHA automated evidence. Windows execution, real-model
+behavior, and complete sidebar recovery remain unestablished; they must not be
+inferred from local checks, the hosted matrix, or packaged behavioral cases.
 
 Local copies and symbolic links are intentionally review-first, not an automatic
 update channel. To upgrade, inspect the actual supported skills-directory entry
