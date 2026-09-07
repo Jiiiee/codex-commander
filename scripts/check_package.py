@@ -1354,7 +1354,7 @@ def scan_text(text, file_name="<memory>"):
                 if not (in_exempt or in_forced or in_boundary or ordinary_boundary):
                     index += 1
                     continue
-                if index == 0 and _follows_placeholder_path_segment(text, source_start):
+                if _follows_placeholder_path_segment(text, source_start):
                     index += 1
                     continue
                 span_length = source_end - source_start

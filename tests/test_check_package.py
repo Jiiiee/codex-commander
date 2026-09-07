@@ -1653,9 +1653,32 @@ class DetectionContractV05Tests(unittest.TestCase):
                 match.end() for match in re.finditer(r">", value)
             ):
                 for seam in (8_192, 16_384, 24_576):
-                    with self.subTest(value=value, seam=seam, placeholder_end=placeholder_end):
-                        text = " " * (seam - placeholder_end) + value
-                        self.assertEqual(checker.scan_text(text, "README.md")["reports"], [])
+                    for offset in range(-3, 4):
+                        with self.subTest(
+                            value=value,
+                            seam=seam,
+                            offset=offset,
+                            placeholder_end=placeholder_end,
+                        ):
+                            text = " " * (seam + offset - placeholder_end) + value
+                            self.assertEqual(checker.scan_text(text, "README.md")["reports"], [])
+
+    def test_placeholder_paths_do_not_hide_independent_following_paths(self):
+        prefix = "/Users/<user>"
+
+        for separator in (" ", ";"):
+            for seam in (8_192, 16_384, 24_576):
+                with self.subTest(separator=separator, seam=seam):
+                    text = " " * (seam - len(prefix)) + prefix + separator + "/root/private"
+                    reports = checker.scan_text(text, "README.md")["reports"]
+                    self.assertTrue(
+                        any(
+                            report["category"] == "machine_path"
+                            and report["source_start"] == seam + len(separator)
+                            for report in reports
+                        ),
+                        reports,
+                    )
 
     def test_concrete_account_paths_still_report_at_window_seams(self):
         paths = (
