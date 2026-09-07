@@ -1006,11 +1006,13 @@ def _valid_http_url(value):
     return {"path": (path_start, path_end), "non_path": tuple(non_path)}
 
 
-def _raw_url_regions(text, global_start):
+def _raw_url_regions(text, global_start, document_length, previous_character=None):
     exempt = []
     forced = []
     boundary = []
     too_long = []
+    definitive_exempt = []
+    definitive_forced = []
     url_starts = []
     whitespace = []
     inline_closers = []
@@ -1037,7 +1039,11 @@ def _raw_url_regions(text, global_start):
                     match.end(),
                     inline,
                     index > 0 and text[index - 1] == "<",
-                    index == 0 or _ascii_space(text[index - 1]),
+                    (
+                        index == 0
+                        and (global_start == 0 or _ascii_space(previous_character))
+                    )
+                    or (index > 0 and _ascii_space(text[index - 1])),
                 )
             )
         if _ascii_space(character):
@@ -1106,6 +1112,13 @@ def _raw_url_regions(text, global_start):
         explicit = kind is not None
         if kind == "bare" and candidate and candidate[-1] in BAD_BARE_URL_END:
             explicit = False
+        # Only share classifications whose document boundaries are present in
+        # this view; a URL cut off by the window edge remains local evidence.
+        definitive = explicit and (
+            kind in {"inline", "autolink"}
+            or end < len(text)
+            or global_start + end == document_length
+        )
         parsed = _valid_http_url(candidate) if explicit else None
         source_start = global_start + start
         source_end = global_start + end
@@ -1116,12 +1129,25 @@ def _raw_url_regions(text, global_start):
             boundary.append((source_start, source_end))
             continue
         path_start, path_end = parsed["path"]
-        exempt.append((source_start + path_start, source_start + path_end))
-        forced.extend(
+        path_interval = (source_start + path_start, source_start + path_end)
+        non_path_intervals = tuple(
             (source_start + component_start, source_start + component_end)
             for component_start, component_end in parsed["non_path"]
         )
-    return exempt, forced, boundary, too_long, work
+        exempt.append(path_interval)
+        forced.extend(non_path_intervals)
+        if definitive:
+            definitive_exempt.append(path_interval)
+            definitive_forced.extend(non_path_intervals)
+    return (
+        exempt,
+        forced,
+        boundary,
+        too_long,
+        definitive_exempt,
+        definitive_forced,
+        work,
+    )
 
 
 def _in_interval(start, end, intervals):
@@ -1237,15 +1263,50 @@ def scan_text(text, file_name="<memory>"):
     def line_for(position):
         return bisect_right(line_starts, position)
 
+    windows = []
     for window_start in range(0, len(text), DETECTION_OVERLAP):
         raw = text[window_start:min(window_start + DETECTION_WINDOW, len(text))]
         metrics["max_window"] = max(metrics["max_window"], len(raw))
-        exempt, forced, boundary, long_urls, raw_url_work = _raw_url_regions(raw, window_start)
+        (
+            exempt,
+            forced,
+            boundary,
+            long_urls,
+            definitive_exempt,
+            definitive_forced,
+            raw_url_work,
+        ) = _raw_url_regions(
+            raw,
+            window_start,
+            len(text),
+            text[window_start - 1] if window_start else None,
+        )
         metrics["work"] += raw_url_work
         for source_start, source_end in long_urls:
             metrics["max_candidate_span"] = max(metrics["max_candidate_span"], source_end - source_start)
             reports.append(_make_report(file_name, line_for(source_start), "candidate_too_long", source_start, source_end))
+        windows.append(
+            (
+                window_start,
+                raw,
+                exempt,
+                forced,
+                boundary,
+                definitive_exempt,
+                definitive_forced,
+            )
+        )
 
+    for window_index, window in enumerate(windows):
+        window_start, raw, exempt, forced, boundary, _, _ = window
+        # Every in-scope token is at most one overlap wide, so an adjacent
+        # window is sufficient to provide its complete URL structure.
+        neighbors = windows[max(0, window_index - 1):window_index + 2]
+        effective_exempt = list(exempt)
+        effective_forced = list(forced)
+        for neighbor in neighbors:
+            effective_exempt.extend(neighbor[5])
+            effective_forced.extend(neighbor[6])
         initial_spans = tuple((window_start + index, window_start + index + 1) for index in range(len(raw)))
         states = [(raw, initial_spans, 0)]
         seen = {raw}
@@ -1268,8 +1329,9 @@ def scan_text(text, file_name="<memory>"):
                     end = _token_end(value, index)
                     current_token_end = end
                 source_start, source_end = _source_span(spans, index, end)
-                in_exempt = _in_interval(source_start, source_end, exempt)
-                in_forced = _overlaps_interval(source_start, source_end, forced)
+                in_exempt = _in_interval(source_start, source_end, effective_exempt)
+                in_forced = _overlaps_interval(source_start, source_end, effective_forced)
+                fully_forced = _in_interval(source_start, source_end, effective_forced)
                 in_boundary = _overlaps_interval(source_start, source_end, boundary)
                 ordinary_boundary = (
                     index == 0
@@ -1289,12 +1351,18 @@ def scan_text(text, file_name="<memory>"):
                     metrics["work"] += len(candidate)
                     is_machine_path = _machine_path_token(candidate)
                     if not is_machine_path:
-                        index += 1
+                        index = (
+                            max(index + 1, end)
+                            if ordinary_boundary or in_exempt or fully_forced
+                            else index + 1
+                        )
                         continue
                     if in_exempt:
-                        index += 1
+                        index = max(index + 1, end)
                         continue
-                    category = "url_boundary" if in_boundary else "machine_path"
+                    category = (
+                        "url_boundary" if in_boundary and not in_forced else "machine_path"
+                    )
                 reports.append(_make_report(file_name, line_for(source_start), category, source_start, source_end))
                 index = max(index + 1, end)
 

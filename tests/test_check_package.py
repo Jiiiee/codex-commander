@@ -1631,6 +1631,49 @@ class DetectionContractV05Tests(unittest.TestCase):
             self.assertTrue(any(report["file"] == "VERSION" for report in reports), reports)
             self.assertFalse(any(report["file"] == "not-in-manifest.dat" for report in reports), reports)
 
+    def test_allowed_placeholder_token_is_not_reclassified_from_an_internal_suffix(self):
+        result = checker.scan_text("\x2fUsers/<user>/root", "README.md")
+
+        self.assertEqual(result["reports"], [])
+
+    def test_repeated_machine_path_segments_in_urls_have_bounded_work(self):
+        url_unit = "https://example.test" + "\x2fUsers/demo" * 400 + " "
+
+        def generated(length):
+            return (url_unit * (length // len(url_unit) + 1))[:length]
+
+        results = []
+        for length in (131_072, 262_144):
+            result = checker.scan_text(generated(length), "README.md")
+            self.assertEqual(result["reports"], [])
+            self.assertLessEqual(result["metrics"]["work"], 64 * length + 524_288)
+            results.append(result)
+
+        self.assertLessEqual(
+            results[1]["metrics"]["work"] / results[0]["metrics"]["work"],
+            2.2,
+        )
+
+    def test_inline_link_exemption_survives_overlapping_window_boundaries(self):
+        link = "[docs](https://example.test" + "\x2fUsers/demo/guide)"
+
+        for offset in (8_187, 8_189, 8_192):
+            with self.subTest(offset=offset):
+                result = checker.scan_text("x" * offset + link, "README.md")
+                self.assertEqual(result["reports"], [])
+
+    def test_other_url_exemptions_survive_near_overlapping_window_boundaries(self):
+        cases = (
+            (8_187, "![image](https://example.test" + "\x2fUsers/demo/image.png)"),
+            (8_191, "<https://example.test" + "\x2fUsers/demo/guide>"),
+            (8_187, " https://example.test" + "\x2fUsers/demo/guide"),
+        )
+
+        for offset, value in cases:
+            with self.subTest(offset=offset, value=value):
+                result = checker.scan_text("x" * offset + value, "README.md")
+                self.assertEqual(result["reports"], [])
+
     def test_dense_raw_url_prescan_has_counted_linear_work(self):
         prefix = "[" + "p" * 8_190 + " "
         url_unit = "https://example.test/network/guide "
