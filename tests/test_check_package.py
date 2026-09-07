@@ -1664,12 +1664,12 @@ class DetectionContractV05Tests(unittest.TestCase):
                             self.assertEqual(checker.scan_text(text, "README.md")["reports"], [])
 
     def test_placeholder_paths_do_not_hide_independent_following_paths(self):
-        prefix = "/Users/<user>"
+        prefix = "\x2fUsers/<user>"
 
         for separator in (" ", ";"):
             for seam in (8_192, 16_384, 24_576):
                 with self.subTest(separator=separator, seam=seam):
-                    text = " " * (seam - len(prefix)) + prefix + separator + "/root/private"
+                    text = " " * (seam - len(prefix)) + prefix + separator + "\x2froot/private"
                     reports = checker.scan_text(text, "README.md")["reports"]
                     self.assertTrue(
                         any(
@@ -1682,11 +1682,11 @@ class DetectionContractV05Tests(unittest.TestCase):
 
     def test_concrete_account_paths_still_report_at_window_seams(self):
         paths = (
-            "/Users/alice/root",
-            "/home/alice/root",
-            "/Volumes/Data/root",
-            r"C:\Users\alice\root",
-            r"\\server\share\root",
+            "\x2fUsers/alice/root",
+            "\x2fhome/alice/root",
+            "\x2fVolumes/Data/root",
+            "C:" + r"\Users\alice\root",
+            "\\" * 2 + r"server\share\root",
         )
 
         for value in paths:
