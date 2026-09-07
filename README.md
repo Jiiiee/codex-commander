@@ -218,8 +218,10 @@ Inspect the preview and repeat with `--apply` only for an authorized target.
 Use `--language zh-CN` or `zh-TW` for Chinese documents. The helper does not
 auto-detect conversation language; the agent selects it from the conversation.
 It preserves existing plan documents and fails on unsafe/ambiguous output paths.
-On rerun it removes only newer temporary residue that exactly matches the current
-plan and passes stable metadata checks. Legacy, different-plan, or uncertain residue
+On rerun it removes only temporary residue that exactly matches the current plan,
+has a carrier-name timestamp before the current apply, and passes identity and
+content checks. Filesystem timestamps are not used to corroborate the name because
+their clock and precision may differ. Legacy, different-plan, or uncertain residue
 is preserved for user-confirmed manual handling; its advisory lock and cleanup are
 not atomic against non-cooperating writers with access to the same directory.
 

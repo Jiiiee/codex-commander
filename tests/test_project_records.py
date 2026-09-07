@@ -519,6 +519,23 @@ records.apply_plan(records.plan_records(root, "en", "maintainable", "A local too
             with self.subTest(path=uncertain.name):
                 self.assertTrue(uncertain.exists() or uncertain.is_symlink())
 
+    def test_cleanup_does_not_compare_carrier_name_time_to_filesystem_times(self):
+        plan = self.plan()
+        change = plan.changes[0]
+        # These synthetic wall-clock values intentionally cannot agree with
+        # the host filesystem's current mtime/ctime.  The carrier name and
+        # apply cutoff share a clock; filesystem timestamps do not have to.
+        carrier = self.root / records.temporary_name(change.path, change.after, 10_000)
+        carrier.write_bytes(change.after[:17])
+
+        with records.open_root_directory(self.root) as root_fd:
+            self.assertEqual(
+                records.cleanup_stale_temporaries(root_fd, self.root, plan, 20_000),
+                [carrier.name],
+            )
+
+        self.assertFalse(carrier.exists())
+
     def test_new_temporary_files_are_private_before_first_write(self):
         observed_modes = []
         real_fdopen = os.fdopen

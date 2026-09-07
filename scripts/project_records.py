@@ -497,10 +497,12 @@ def cleanup_stale_temporaries(root_fd: int, root: Path, plan: Plan, cutoff_ns: i
             continue
         if visible.st_size > len(content):
             continue
-        if created_ns > visible.st_mtime_ns or created_ns > visible.st_ctime_ns:
-            continue
-        if visible.st_mtime_ns >= cutoff_ns or visible.st_ctime_ns >= cutoff_ns:
-            continue
+        # ``created_ns`` and the cutoff both come from this process's wall
+        # clock.  Filesystem mtime/ctime can use a different clock or a
+        # coarser precision, so they cannot safely corroborate that value.
+        # The carrier's exact current-plan path/content identity, private
+        # shape, and bounded prefix are the evidence for cleanup; time only
+        # rejects a carrier whose own name does not predate this apply.
         try:
             descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
         except (FileNotFoundError, OSError):
