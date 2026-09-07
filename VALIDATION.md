@@ -2,21 +2,22 @@
 
 Version: 0.2.0. Date: 2026-09-07.
 
-## Hosted CI evidence and current-candidate boundary
+## Hosted CI evidence and release-commit boundary
 
-GitHub Actions run `34072191750` completed successfully for earlier candidate
-`46437a7074ba6febb4ddb85a06259f17119bf988`: all eight Ubuntu/macOS × Python
+GitHub Actions run `34095182302` completed successfully for pre-final candidate
+`4be027fbc6d5edf0dc9973724449d00fb1ed067e`: all eight Ubuntu/macOS × Python
 3.10–3.13 jobs succeeded. This is hosted execution evidence for that exact SHA,
 not merely a configured matrix.
 
-The documentation changes recorded here create a later candidate. It has not
-been pushed or run in hosted CI by this record, so it still requires a successful
-Ubuntu/macOS × Python 3.10–3.13 hosted run for its own pushed SHA. Verify that
-future result in GitHub PR/Actions and the external Taskboard record; do not
-transfer the earlier SHA's result to it.
+Any later documentation or checksum commit is a different candidate and must
+complete the same eight-job matrix for its own SHA. A CI run ID is created only
+after the commit exists, so embedding the final run ID in that commit would
+change the SHA again. The release gate therefore verifies the exact tagged
+commit and its successful run externally in GitHub Actions before publication.
 
-Ubuntu is established only for the earlier same-SHA automated matrix. Windows
-execution, real-model behavior, and complete sidebar recovery remain
+Hosted Linux and macOS execution is established for the pre-final candidate and
+must be re-established for the exact release commit by that external gate.
+Windows execution, real-model behavior, and complete sidebar recovery remain
 unestablished. Local checks and packaged behavioral cases do not establish any
 of those boundaries.
 
@@ -136,7 +137,7 @@ checksum manifest before the final gate is repeated.
 | `python3.11 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | `python3.12 -B scripts/check_package.py` | Passed with no structural or manifest errors. |
 | Runner `--list` and `--dry-run` | Listed 13 packaged cases; dry-run planned 13 and completed none. |
-| `.github/workflows/ci.yml` | Parsed locally and configures eight Ubuntu/macOS × Python 3.10–3.13 jobs. The later hosted success for SHA `46437a7074ba6febb4ddb85a06259f17119bf988` is recorded above; a later candidate still needs an own-SHA hosted result. |
+| `.github/workflows/ci.yml` | Parsed locally and configures eight Ubuntu/macOS × Python 3.10–3.13 jobs. A later hosted success for SHA `46437a7074ba6febb4ddb85a06259f17119bf988` was recorded separately; every release commit still needs an own-SHA hosted result. |
 | Git candidate state | `VERSION` was `0.2.0`, the checksum manifest matched that historical release payload, and the reviewed worktree was clean. |
 
 The checksum result establishes internal file-set, version, and hash

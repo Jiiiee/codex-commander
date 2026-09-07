@@ -11,8 +11,8 @@ and must be verified in their respective services.
 ## Highlights
 
 - Adds GitHub Actions coverage for Python 3.10–3.13 on Ubuntu and macOS.
-  Historical GitHub Actions run `34072191750` completed all eight jobs for
-  earlier candidate `46437a7074ba6febb4ddb85a06259f17119bf988` successfully.
+  Pre-final GitHub Actions run `34095182302` completed all eight jobs for
+  candidate `4be027fbc6d5edf0dc9973724449d00fb1ed067e` successfully.
 - Adds a 13-case behavioral runner with list, dry-run, selected-case, and
   machine-readable result modes.
 - Hardens project-record writes with directory-relative file descriptors,
@@ -31,9 +31,10 @@ and must be verified in their respective services.
   beyond the Python standard library used by its optional helpers and tests.
 - Python 3.10–3.13 is the documented range; Python 3.9 is unsupported even if
   it happens to run locally. Local verification covers Python 3.11 and 3.12 on
-  macOS; the earlier candidate has the hosted Ubuntu/macOS × Python 3.10–3.13
-  evidence above. Windows execution, real-model behavior, and complete sidebar
-  recovery remain unestablished.
+  macOS; the pre-final candidate has the hosted Ubuntu/macOS × Python 3.10–3.13
+  evidence above. The exact tagged commit must pass the same eight-job matrix
+  before publication. Windows execution, real-model behavior, and complete
+  sidebar recovery remain unestablished.
 - Project-record preview is portable. Apply requires the directory-relative and
   advisory-lock primitives available on supported macOS/Linux systems and
   safely refuses on Windows or other platforms without them.
@@ -42,11 +43,11 @@ and must be verified in their respective services.
 
 ## Verification
 
-- Local and historical hosted verification results are recorded in
-  [VALIDATION.md](VALIDATION.md). The historical hosted result applies only to
-  `46437a7074ba6febb4ddb85a06259f17119bf988`; this later candidate still needs
-  a successful hosted run for its own pushed SHA, verified externally in GitHub
-  PR/Actions and the Taskboard record.
+- Local and hosted verification policy and evidence are recorded in
+  [VALIDATION.md](VALIDATION.md). Run `34095182302` applies only to pre-final
+  candidate `4be027fbc6d5edf0dc9973724449d00fb1ed067e`. The exact tagged commit must
+  have its own successful eight-job run before publication; its run ID is
+  external metadata created after the commit and is verified in GitHub Actions.
 - The behavioral runner lists 13 packaged cases; dry-run records all 13 without
   launching case commands.
 - `git diff --check` passes.

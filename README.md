@@ -99,19 +99,18 @@ configuration file is not mistaken for a completed hosted run:
 | Future minor versions | Not declared until reviewed. | None until added deliberately. | None. |
 
 The repository's GitHub Actions workflow is configured for the listed CI
-targets. Historical hosted evidence exists for the earlier candidate
-`46437a7074ba6febb4ddb85a06259f17119bf988`: GitHub Actions run `34072191750`
-completed all eight Ubuntu/macOS × Python 3.10–3.13 jobs successfully. A
-configured matrix is not itself execution evidence, and that run does not
-establish results for a later candidate. The candidate produced by this
-documentation update still needs a hosted run for its own pushed SHA; verify
-that result in GitHub PR/Actions and the external Taskboard record. See
-[VALIDATION.md](VALIDATION.md) for the exact local commands and historical
-results.
+targets. Pre-final candidate `4be027fbc6d5edf0dc9973724449d00fb1ed067e`
+completed all eight Ubuntu/macOS × Python 3.10–3.13 jobs in GitHub Actions run
+`34095182302`. A configured matrix is not itself execution evidence, and that
+run does not establish results for a later commit. The release gate therefore
+reruns the matrix for the exact tagged commit and publishes only after all eight
+jobs succeed. The final run ID is external metadata created after the commit and
+must be verified in GitHub Actions. See [VALIDATION.md](VALIDATION.md) for the
+local commands, policy, and historical results.
 
-Ubuntu has this same-SHA automated evidence. Windows execution, real-model
-behavior, and complete sidebar recovery remain unestablished; they must not be
-inferred from local checks, the hosted matrix, or packaged behavioral cases.
+Windows execution, real-model behavior, and complete sidebar recovery remain
+unestablished; they must not be inferred from local checks, the hosted matrix,
+or packaged behavioral cases.
 
 Local copies and symbolic links are intentionally review-first, not an automatic
 update channel. To upgrade, inspect the actual supported skills-directory entry
@@ -129,12 +128,14 @@ CI. When changing delegation or other behavior, update the behavioral cases and
 record only the runtime evidence actually obtained. A release is not implied by
 these maintenance steps.
 
-The current source may be reviewed as a **v0.2.0 local candidate**. `Intended tag`
-in [RELEASE_NOTES.md](RELEASE_NOTES.md) names that candidate; it does not establish
-a local or remote Git tag. A remote tag and a GitHub Release are separate facts
-that must each be verified in their respective services. [RELEASE_CHECKSUMS.txt](RELEASE_CHECKSUMS.txt)
-checks only the candidate's internal file-set, version, and hash consistency; it
-does not prove source provenance, a real tag, or resistance to malicious tampering.
+Before publication, version 0.2.0 source may be reviewed as a local candidate;
+when published, the annotated `v0.2.0` tag identifies the release commit.
+`Intended tag` in [RELEASE_NOTES.md](RELEASE_NOTES.md) is metadata and does not by
+itself establish a local or remote Git tag. A remote tag and a GitHub Release are
+separate facts that must each be verified in their respective services.
+[RELEASE_CHECKSUMS.txt](RELEASE_CHECKSUMS.txt) checks only the candidate's internal
+file-set, version, and hash consistency; it does not prove source provenance, a
+real tag, or resistance to malicious tampering.
 
 ## Use
 
