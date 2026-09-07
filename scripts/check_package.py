@@ -1183,6 +1183,18 @@ def _placeholder(value):
     return PLACEHOLDER.fullmatch(value) is not None
 
 
+def _follows_placeholder_path_segment(text, start):
+    """Whether ``start`` continues a placeholder segment just before a window."""
+    if start == 0 or text[start - 1] != ">":
+        return False
+    lookback_start = max(0, start - MAX_DETECTION_TOKEN)
+    segment_start = max(
+        text.rfind("/", lookback_start, start),
+        text.rfind("\\", lookback_start, start),
+    )
+    return segment_start != -1 and _placeholder(text[segment_start + 1:start])
+
+
 def _root_or_descendant(value, root):
     return value == root or value.startswith(root + "/")
 
@@ -1340,6 +1352,9 @@ def scan_text(text, file_name="<memory>"):
                     index > 0 and (value[index - 1] in ASCII_WHITESPACE or value[index - 1] in PATH_TERMINATORS)
                 )
                 if not (in_exempt or in_forced or in_boundary or ordinary_boundary):
+                    index += 1
+                    continue
+                if index == 0 and _follows_placeholder_path_segment(text, source_start):
                     index += 1
                     continue
                 span_length = source_end - source_start

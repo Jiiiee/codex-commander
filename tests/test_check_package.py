@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -1635,6 +1636,46 @@ class DetectionContractV05Tests(unittest.TestCase):
         result = checker.scan_text("\x2fUsers/<user>" + "\x2froot", "README.md")
 
         self.assertEqual(result["reports"], [])
+
+    def test_placeholder_paths_keep_their_file_start_verdict_at_window_seams(self):
+        placeholders = (
+            "/Users/<user>/root",
+            "/home/<user>/root",
+            "/Volumes/<volume>/root",
+            r"C:\Users\<user>\root",
+            r"\\<server>\<share>\root",
+        )
+
+        for value in placeholders:
+            with self.subTest(value=value, location="start"):
+                self.assertEqual(checker.scan_text(value, "README.md")["reports"], [])
+            for placeholder_end in (
+                match.end() for match in re.finditer(r">", value)
+            ):
+                for seam in (8_192, 16_384, 24_576):
+                    with self.subTest(value=value, seam=seam, placeholder_end=placeholder_end):
+                        text = " " * (seam - placeholder_end) + value
+                        self.assertEqual(checker.scan_text(text, "README.md")["reports"], [])
+
+    def test_concrete_account_paths_still_report_at_window_seams(self):
+        paths = (
+            "/Users/alice/root",
+            "/home/alice/root",
+            "/Volumes/Data/root",
+            r"C:\Users\alice\root",
+            r"\\server\share\root",
+        )
+
+        for value in paths:
+            account_end = value.rfind("/") if "/" in value else value.rfind("\\")
+            for seam in (8_192, 16_384, 24_576):
+                with self.subTest(value=value, seam=seam):
+                    text = " " * (seam - account_end) + value
+                    reports = checker.scan_text(text, "README.md")["reports"]
+                    self.assertTrue(
+                        any(report["category"] == "machine_path" for report in reports),
+                        reports,
+                    )
 
     def test_repeated_machine_path_segments_in_urls_have_bounded_work(self):
         url_unit = "https://example.test" + "\x2fUsers/demo" * 400 + " "
