@@ -1660,6 +1660,44 @@ class DetectionContractV05Tests(unittest.TestCase):
             2.2,
         )
 
+    def test_dense_machine_path_candidates_have_counted_linear_work(self):
+        path_tokens = ("/Users/<user>", "C:\\Users\\<user>", "\\\\<server>\\<share>")
+        path_unit = ";".join(path_tokens) + ";safe-padding-1;"
+        control_unit = (
+            "xUsers/<user>;1:\\Users\\<user>;xx<server>\\<share>;safe-padding-1;"
+        )
+        small_n = 131_072
+        large_n = 262_144
+        self.assertEqual(len(path_unit), len(control_unit), 64)
+
+        def generated(length, unit):
+            return (unit * (length // len(unit) + 1))[:length]
+
+        path_results = []
+        for length in (small_n, large_n):
+            paths = checker.scan_text(generated(length, path_unit), "README.md")
+            control = checker.scan_text(generated(length, control_unit), "README.md")
+            self.assertEqual(paths["reports"], [])
+            self.assertEqual(control["reports"], [])
+            window_characters = sum(
+                min(16_384, length - start) for start in range(0, length, 8_192)
+            )
+            expected_classifier_work = (
+                window_characters // len(path_unit) * sum(map(len, path_tokens))
+            )
+            self.assertEqual(
+                paths["metrics"]["work"] - control["metrics"]["work"],
+                expected_classifier_work,
+                "machine-path candidate tokens must be included in classifier work",
+            )
+            self.assertLessEqual(paths["metrics"]["work"], 64 * length + 524_288)
+            path_results.append(paths)
+
+        self.assertLessEqual(
+            path_results[1]["metrics"]["work"] / path_results[0]["metrics"]["work"],
+            2.2,
+        )
+
     def test_fixed_windows_state_bounds_and_linear_work(self):
         unit = "%26amp%3Bcopy%3B-safe "
         small_n = 131_072

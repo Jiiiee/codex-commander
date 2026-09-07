@@ -191,6 +191,29 @@ no hosted CI, push, pull request, tag, release, or external review was used.
 | Full local suite | All 156 tests passed, comprising the previous 155 behaviors plus the new adversarial regression. |
 | Package and supporting local gates | The package check, checksum verification, runner list, runner dry-run to a temporary output path, and diff whitespace check passed. |
 
+## COD-46 machine-path classifier accounting (attempt 1)
+
+The status sentence retained in `docs/check-package-detection-contract-v0.5.md`
+records the freeze point before implementation authorization. It remains
+historical review evidence, not the current authorization or implementation
+status. The later COD-46 task authorization and this validation record are the
+current sources for implementation and verification status; the frozen file and
+its SHA-256 value remain unchanged.
+
+The machine-path candidate classifier accounting was repaired and checked
+locally on macOS on 2026-09-07. The v0.5 classifications, scan set, reports,
+decoding, candidate limit, and 2.2/64N work limits were unchanged. No hosted CI,
+push, pull request, tag, release, or external review was used.
+
+| Check | Observed result |
+| --- | --- |
+| Independent adversarial regression | A deterministic 64-character unit combines allowed POSIX, Windows, and UNC placeholder candidates with dense path starts, path separators, and token terminators. At 131,072/262,144 characters, the pre-fix path and same-length no-path controls both reported 1,015,808/2,064,384 work, leaving a zero classifier delta. |
+| Counted bounded work after repair | Path work was 1,198,336 and 2,435,328 characters; the 2N/N ratio was 2.0323. The corresponding absolute limits were 8,912,896 and 17,301,504. Same-length controls remained 1,015,808 and 2,064,384 work. |
+| Classifier call accounting | The classifier received 11,904/24,192 bounded candidates totaling 182,528/370,944 characters. Those totals exactly matched the path-minus-control `metrics.work` deltas. |
+| Detection compatibility | All 60 frozen fixture cases passed under Python 3.12, and the targeted accounting regression passed under Python 3.11 and 3.12. |
+| Full local suites | All 157 tests passed under both Python 3.11 and Python 3.12. |
+| Package and supporting local gates | Python 3.11/3.12 package checks, checksum verification, the 13-case runner list and dry-run, diff whitespace check, and frozen-contract hash verification passed. |
+
 ## Version 0.1.3: bilingual publication preparation
 
 Added a complete Simplified Chinese README with reciprocal language links.

@@ -1284,14 +1284,17 @@ def scan_text(text, file_name="<memory>"):
                 metrics["max_candidate_span"] = max(metrics["max_candidate_span"], span_length)
                 if span_length > MAX_DETECTION_TOKEN:
                     category = "candidate_too_long"
-                elif _machine_path_token(value[index:end]):
+                else:
+                    candidate = value[index:end]
+                    metrics["work"] += len(candidate)
+                    is_machine_path = _machine_path_token(candidate)
+                    if not is_machine_path:
+                        index += 1
+                        continue
                     if in_exempt:
                         index += 1
                         continue
                     category = "url_boundary" if in_boundary else "machine_path"
-                else:
-                    index += 1
-                    continue
                 reports.append(_make_report(file_name, line_for(source_start), category, source_start, source_end))
                 index = max(index + 1, end)
 
