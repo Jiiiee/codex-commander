@@ -1632,7 +1632,7 @@ class DetectionContractV05Tests(unittest.TestCase):
             self.assertFalse(any(report["file"] == "not-in-manifest.dat" for report in reports), reports)
 
     def test_allowed_placeholder_token_is_not_reclassified_from_an_internal_suffix(self):
-        result = checker.scan_text("\x2fUsers/<user>/root", "README.md")
+        result = checker.scan_text("\x2fUsers/<user>" + "\x2froot", "README.md")
 
         self.assertEqual(result["reports"], [])
 
