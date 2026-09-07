@@ -1663,6 +1663,13 @@ class DetectionContractV05Tests(unittest.TestCase):
                             text = " " * (seam + offset - placeholder_end) + value
                             self.assertEqual(checker.scan_text(text, "README.md")["reports"], [])
 
+    def test_encoded_placeholder_suffixes_keep_their_verdict_at_window_seams(self):
+        prefix = "/Users/<user>"
+        for encoded_separator in ("%2F", "&sol;"):
+            with self.subTest(encoded_separator=encoded_separator):
+                text = " " * 8_179 + prefix + encoded_separator + "root"
+                self.assertEqual(checker.scan_text(text, "README.md")["reports"], [])
+
     def test_placeholder_paths_do_not_hide_independent_following_paths(self):
         prefix = "\x2fUsers/<user>"
 
@@ -1748,6 +1755,21 @@ class DetectionContractV05Tests(unittest.TestCase):
             ),
             reports,
         )
+
+    def test_independent_drive_and_unc_paths_report_at_placeholder_seams(self):
+        prefix = "/Users/<user>"
+        cases = (
+            prefix + "C:" + r"\Users\demo",
+            "/tmp/<example>" + "\\" * 2 + r"fileserver\team\docs",
+        )
+
+        for value in cases:
+            with self.subTest(value=value):
+                reports = checker.scan_text(" " * 8_179 + value, "README.md")["reports"]
+                self.assertTrue(
+                    any(report["category"] == "machine_path" for report in reports),
+                    reports,
+                )
 
     def test_concrete_account_paths_still_report_at_window_seams(self):
         paths = (

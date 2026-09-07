@@ -1183,21 +1183,23 @@ def _placeholder(value):
     return PLACEHOLDER.fullmatch(value) is not None
 
 
-def _follows_placeholder_path_segment(text, start):
-    """Whether ``start`` continues a placeholder segment just before a window."""
+def _follows_placeholder_path_segment(text, value, spans, start):
+    """Whether a decoded separator continues a placeholder path segment."""
+    source_start, source_end = spans[start]
     if (
-        start == 0
-        or text[start] not in "/\\"
-        or text[start - 1] != ">"
-        or (start + 1 < len(text) and text[start + 1] in "/\\")
+        source_start == 0
+        or source_end <= source_start
+        or value[start] not in "/\\"
+        or text[source_start - 1] != ">"
+        or (start + 1 < len(value) and value[start + 1] in "/\\")
     ):
         return False
-    lookback_start = max(0, start - MAX_DETECTION_TOKEN)
+    lookback_start = max(0, source_start - MAX_DETECTION_TOKEN)
     segment_start = max(
-        text.rfind("/", lookback_start, start),
-        text.rfind("\\", lookback_start, start),
+        text.rfind("/", lookback_start, source_start),
+        text.rfind("\\", lookback_start, source_start),
     )
-    return segment_start != -1 and _placeholder(text[segment_start + 1:start])
+    return segment_start != -1 and _placeholder(text[segment_start + 1:source_start])
 
 
 def _root_or_descendant(value, root):
@@ -1359,7 +1361,7 @@ def scan_text(text, file_name="<memory>"):
                 if not (in_exempt or in_forced or in_boundary or ordinary_boundary):
                     index += 1
                     continue
-                if _follows_placeholder_path_segment(text, source_start):
+                if _follows_placeholder_path_segment(text, value, spans, index):
                     index += 1
                     continue
                 span_length = source_end - source_start
