@@ -1666,7 +1666,7 @@ class DetectionContractV05Tests(unittest.TestCase):
     def test_placeholder_paths_do_not_hide_independent_following_paths(self):
         prefix = "\x2fUsers/<user>"
 
-        for separator in (" ", ";"):
+        for separator in (" ", ";", ","):
             for seam in (8_192, 16_384, 24_576):
                 with self.subTest(separator=separator, seam=seam):
                     text = " " * (seam - len(prefix)) + prefix + separator + "\x2froot/private"
@@ -1679,6 +1679,75 @@ class DetectionContractV05Tests(unittest.TestCase):
                         ),
                         reports,
                     )
+
+    def test_placeholder_suffix_skip_requires_a_path_separator(self):
+        rejected = (
+            "/tmp/<example>" + "C" + ":" + r"\ProgramData",
+            "\x2fUsers/<user>" + "C" + ":" + r"\Users\demo",
+            "\x2fUsers/alice/root",
+            "\x2fUsers/<user>; \x2froot/private",
+            "\x2fUsers/<user>, \x2froot/private",
+        )
+
+        for value in rejected:
+            with self.subTest(value=value):
+                reports = checker.scan_text(value, "README.md")["reports"]
+                self.assertTrue(
+                    any(report["category"] == "machine_path" for report in reports),
+                    reports,
+                )
+
+        self.assertEqual(
+            checker.scan_text("\x2fUsers/<user>/root", "README.md")["reports"],
+            [],
+        )
+        self.assertEqual(
+            checker.scan_text("C" + ":" + r"\Users\<user>\root", "README.md")["reports"],
+            [],
+        )
+
+    def test_placeholder_suffix_skip_rejects_an_independent_unc_path(self):
+        prefix = "/tmp/<example>"
+        path = "\\" * 2 + r"fileserver\team\docs"
+
+        reports = checker.scan_text(prefix + path, "README.md")["reports"]
+
+        self.assertTrue(
+            any(report["category"] == "machine_path" for report in reports),
+            reports,
+        )
+
+    def test_independent_unc_path_reports_at_placeholder_window_seam(self):
+        prefix = "/tmp/<example>"
+        path = "\\" * 2 + r"fileserver\team\docs"
+        text = " " * (8_192 - len(prefix)) + prefix + path
+
+        reports = checker.scan_text(text, "README.md")["reports"]
+
+        self.assertTrue(
+            any(
+                report["category"] == "machine_path"
+                and report["source_start"] == 8_192
+                for report in reports
+            ),
+            reports,
+        )
+
+    def test_independent_windows_path_reports_at_placeholder_window_seam(self):
+        prefix = "\x2fUsers/<user>"
+        path = "C" + ":" + r"\Users\demo"
+        text = " " * (8_192 - len(prefix)) + prefix + path
+
+        reports = checker.scan_text(text, "README.md")["reports"]
+
+        self.assertTrue(
+            any(
+                report["category"] == "machine_path"
+                and report["source_start"] == 8_192
+                for report in reports
+            ),
+            reports,
+        )
 
     def test_concrete_account_paths_still_report_at_window_seams(self):
         paths = (

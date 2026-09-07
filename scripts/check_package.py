@@ -1185,7 +1185,12 @@ def _placeholder(value):
 
 def _follows_placeholder_path_segment(text, start):
     """Whether ``start`` continues a placeholder segment just before a window."""
-    if start == 0 or text[start - 1] != ">":
+    if (
+        start == 0
+        or text[start] not in "/\\"
+        or text[start - 1] != ">"
+        or (start + 1 < len(text) and text[start + 1] in "/\\")
+    ):
         return False
     lookback_start = max(0, start - MAX_DETECTION_TOKEN)
     segment_start = max(
